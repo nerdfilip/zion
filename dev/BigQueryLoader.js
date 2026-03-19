@@ -16,13 +16,159 @@ const FILE_RULES = [
 
 const TYPE_OVERRIDES = {
   "ian": "INT64",
+  "ean": "INT64",
+  "artikelnummer": "INT64",
+  "article_number": "INT64",
+  "stock": "INT64",
+  "bestand": "INT64",
   "laenderspezifische_sap_nummern": "INT64",
   "abverkaufshorizont_nat": "INT64",
   "kopfartikel": "INT64",
-  "summe_von_st_rwa": "NUMERIC",
+  "summe_von_st_rwa": "BIGNUMERIC",
+  "rwa_pro_st_ck": "BIGNUMERIC",
+  "rwa_pro_stueck": "BIGNUMERIC",
   "aktions_vk": "NUMERIC",
   "sortiment_vk_lidl": "NUMERIC", 
 };
+
+const HEADER_TYPE_RULES = [
+  {
+    type: 'BIGNUMERIC',
+    patterns: [
+      /^summe_von_st_rwa$/,
+      /^rwa_pro_st_ck$/,
+      /^rwa_pro_stueck$/,
+      /(^|_)rwa(_|$)/
+    ]
+  },
+  {
+    type: 'INT64',
+    patterns: [
+      /^ian$/,
+      /^ean$/,
+      /^artikelnummer(_\d+)?$/,
+      /^article_number(_\d+)?$/,
+      /^laenderspezifische_sap_nummern$/,
+      /^abverkaufshorizont_nat$/,
+      /^kopfartikel$/,
+      /(^|_)(sap_nummer|sap_nummern)(_|$)/,
+      /(^|_)(stock|bestand)(_|$)/
+    ]
+  },
+  {
+    type: 'DATE',
+    patterns: [
+      /(^|_)(datum|date)(_|$)/,
+      /(^|_)(gueltig_ab|gueltig_bis)(_|$)/
+    ]
+  },
+  {
+    type: 'NUMERIC',
+    patterns: [
+      /(^|_)(preis|wert|kosten|vk|eur|volumen|umsatz|betrag)(_|$)/,
+      /^aktions_vk$/,
+      /^sortiment_vk_lidl$/
+    ]
+  },
+  {
+    type: 'BOOL',
+    patterns: [
+      /(^|_)(aktiv|active|flag|is_.*|bool)(_|$)/
+    ]
+  }
+];
+
+function inferDataTypeFromHeader_(headerName) {
+  const key = String(headerName || '').toLowerCase();
+  if (!key) return null;
+  if (TYPE_OVERRIDES[key]) return TYPE_OVERRIDES[key];
+
+  for (let i = 0; i < HEADER_TYPE_RULES.length; i++) {
+    const rule = HEADER_TYPE_RULES[i];
+    const patterns = rule.patterns || [];
+    for (let j = 0; j < patterns.length; j++) {
+      if (patterns[j].test(key)) return rule.type;
+    }
+  }
+
+  return null;
+}
+
+function normalizeNumberish_(value, fileDelimiter) {
+  let v = String(value || '').trim();
+  if (!v) return '';
+  v = v.replace(/[€$£\s]/g, '').replace(/[^0-9,.-]/g, '');
+  if (!v) return '';
+
+  if (fileDelimiter === ';') {
+    return v.replace(/\./g, '').replace(/,/g, '.');
+  }
+  return v.replace(/,/g, '');
+}
+
+function inferDataTypeFromSamples_(samples, fileDelimiter) {
+  const values = (samples || [])
+    .map(v => String(v == null ? '' : v).trim())
+    .filter(v => v && !/^null$/i.test(v) && v !== '-');
+
+  if (!values.length) return 'STRING';
+
+  let dateCount = 0;
+  let boolCount = 0;
+  let intCount = 0;
+  let decimalCount = 0;
+  let intOverflowCount = 0;
+
+  const INT64_MIN_BI = BigInt('-9223372036854775808');
+  const INT64_MAX_BI = BigInt('9223372036854775807');
+
+  for (let i = 0; i < values.length; i++) {
+    const raw = values[i];
+    if (/^(true|false|yes|no|ja|nein|0|1)$/i.test(raw)) {
+      boolCount++;
+      continue;
+    }
+
+    if (/^\d{4}-\d{2}-\d{2}$/.test(raw) || /^\d{1,2}[./]\d{1,2}[./]\d{4}$/.test(raw)) {
+      dateCount++;
+      continue;
+    }
+
+    const normalized = normalizeNumberish_(raw, fileDelimiter);
+    if (!normalized) continue;
+
+    const n = Number(normalized);
+    if (Number.isNaN(n)) continue;
+
+    if (/^-?\d+$/.test(normalized)) {
+      intCount++;
+
+      // Keep integer-like IDs that exceed INT64 as STRING to prevent load crashes.
+      const bi = BigInt(normalized);
+      if (bi < INT64_MIN_BI || bi > INT64_MAX_BI) {
+        intOverflowCount++;
+      }
+    } else {
+      decimalCount++;
+    }
+  }
+
+  const total = values.length;
+  const numericCount = intCount + decimalCount;
+  if (dateCount / total >= 0.85) return 'DATE';
+  if (boolCount / total >= 0.9) return 'BOOL';
+  if (numericCount / total >= 0.85) {
+    if (intCount > 0 && decimalCount === 0 && intOverflowCount > 0) return 'STRING';
+    return decimalCount > 0 ? 'NUMERIC' : 'INT64';
+  }
+  return 'STRING';
+}
+
+function resolveColumnType_(headerName, sampleValues, fileDelimiter) {
+  const byHeader = inferDataTypeFromHeader_(headerName);
+  if (byHeader) return byHeader;
+  return inferDataTypeFromSamples_(sampleValues, fileDelimiter);
+}
 
 // --- UPDATED: Now fetches both CSV and Google Sheets ---
 function getReadyFiles() {
@@ -47,7 +193,7 @@ function getReadyFiles() {
 function openBQProgressUI() {
   const html = HtmlService.createHtmlOutputFromFile('BQProgressUI')
     .setWidth(600)
-    .setHeight(450)
+    .setHeight(500)
     .setTitle('BigQuery Ingestion Terminal');
   SpreadsheetApp.getUi().showModalDialog(html, 'Database Loader');
 }
@@ -96,14 +242,15 @@ function buildDynamicSchema(fileId, headerRow, dataRow, forcedDelimiter, project
   }
 
   let rawHeaders = [];
-  let sampleDataRow = []; 
+  let sampleRows = [];
   try { 
     let parsed = Utilities.parseCsv(rawText, fileDelimiter); 
     rawHeaders = parsed[headerRow - 1] || [];
-    sampleDataRow = parsed[dataRow - 1] || []; 
+    sampleRows = parsed.slice(dataRow - 1, Math.min(parsed.length, dataRow - 1 + 40));
   } catch(e) { 
     rawHeaders = (lines[headerRow - 1] || "").split(fileDelimiter); 
-    sampleDataRow = (lines[dataRow - 1] || "").split(fileDelimiter); 
+    const fallback = (lines[dataRow - 1] || "").split(fileDelimiter);
+    sampleRows = [fallback];
   }
 
   console.log(`[SCHEMA] Phase 3: Translating headers to BigQuery format...`);
@@ -125,31 +272,15 @@ function buildDynamicSchema(fileId, headerRow, dataRow, forcedDelimiter, project
     englishHeaders[i] = f;
   }
 
-  console.log(`[SCHEMA] Phase 5: Smart Type Coercion & Overrides...`);
+  console.log(`[SCHEMA] Phase 5: Resolving datatypes from mappings + profiling...`);
   let finalSchemaFields = [];
   
   for(let i = 0; i < englishHeaders.length; i++) {
     let colName = englishHeaders[i];
-    let sampleVal = (sampleDataRow[i] || '').trim();
-    let checkName = colName.toLowerCase();
-    let detectedType = 'STRING';
-
-    let looksLikeDate = /^\d{1,2}[\.\/]\d{1,2}[\.\/]\d{4}/.test(sampleVal) || /^\d{4}-\d{2}-\d{2}/.test(sampleVal);
-    let soundsLikeDate = checkName.includes('datum');
-
-    let looksLikeCurrency = /[€$£]/.test(sampleVal);
-    let soundsLikeCurrency = (checkName.includes('preis') || checkName.includes('wert') || checkName.includes('rwa') || checkName.includes('volumen') || checkName.includes('kosten') || checkName.includes('€') || checkName.includes('eur'));
-
-    if (looksLikeDate || soundsLikeDate) {
-      detectedType = 'DATE';
-    } 
-    else if (looksLikeCurrency || soundsLikeCurrency) {
-      detectedType = 'NUMERIC';
-    } 
-    
-    if (TYPE_OVERRIDES[checkName]) {
-      detectedType = TYPE_OVERRIDES[checkName];
-      console.log(`   -> Override applied: ${colName} forced to ${detectedType}`);
+    let sampleValues = sampleRows.map(r => (r && r[i] != null ? r[i] : ''));
+    let detectedType = resolveColumnType_(colName, sampleValues, fileDelimiter);
+    if (TYPE_OVERRIDES[colName]) {
+      console.log(`   -> Exact override: ${colName} => ${detectedType}`);
     }
     
     finalSchemaFields.push({ name: colName, type: detectedType });
@@ -228,7 +359,15 @@ function processSingleBQFile(fileObj) {
       let cleanStr = `CASE WHEN LOWER(TRIM(${colName})) IN ('', 'null', '-') THEN NULL ELSE TRIM(${colName}) END`;
       let sqlType = f.type.toUpperCase();
 
-      if (sqlType === 'NUMERIC') {
+      if (sqlType === 'BIGNUMERIC') {
+        let noCurrency = `REGEXP_REPLACE(${cleanStr}, r'[^0-9,.-]', '')`;
+        if (fileDelimiter === ';') {
+          return `SAFE_CAST(REPLACE(REPLACE(${noCurrency}, '.', ''), ',', '.') AS BIGNUMERIC) AS ${colName}`;
+        } else {
+          return `SAFE_CAST(REPLACE(${noCurrency}, ',', '') AS BIGNUMERIC) AS ${colName}`;
+        }
+      }
+      else if (sqlType === 'NUMERIC') {
         let noCurrency = `REGEXP_REPLACE(${cleanStr}, r'[^0-9,.-]', '')`;
         if (fileDelimiter === ';') {
           return `SAFE_CAST(REPLACE(REPLACE(${noCurrency}, '.', ''), ',', '.') AS NUMERIC) AS ${colName}`;
@@ -241,7 +380,7 @@ function processSingleBQFile(fileObj) {
         if (fileDelimiter === ';') {
           return `SAFE_CAST(REPLACE(REPLACE(${noCurrency}, '.', ''), ',', '') AS INT64) AS ${colName}`;
         } else {
-          return `CAST(SAFE_CAST(REPLACE(${noCurrency}, ',', '') AS NUMERIC) AS INT64) AS ${colName}`;
+          return `SAFE_CAST(SAFE_CAST(REPLACE(${noCurrency}, ',', '') AS NUMERIC) AS INT64) AS ${colName}`;
         }
       } 
       else if (sqlType === 'DATE') {
@@ -251,6 +390,15 @@ function processSingleBQFile(fileObj) {
             SAFE.PARSE_DATE('%d.%m.%Y', REGEXP_EXTRACT(${cleanStr}, r'^[0-9]{1,2}\\.[0-9]{1,2}\\.[0-9]{4}')),
             SAFE.PARSE_DATE('%d/%m/%Y', REGEXP_EXTRACT(${cleanStr}, r'^[0-9]{1,2}/[0-9]{1,2}/[0-9]{4}'))
           ) AS ${colName}
+        `.trim();
+      }
+      else if (sqlType === 'BOOL') {
+        return `
+          CASE
+            WHEN LOWER(TRIM(${colName})) IN ('true', '1', 'yes', 'ja') THEN TRUE
+            WHEN LOWER(TRIM(${colName})) IN ('false', '0', 'no', 'nein') THEN FALSE
+            ELSE NULL
+          END AS ${colName}
         `.trim();
       } 
       else {
