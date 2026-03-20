@@ -430,17 +430,11 @@ function _checkAktionsplanSourceTables_() {
 
   for (let i = 0; i < tables.length; i++) {
     const { key, tableId } = tables[i];
-    let fields;
-    try {
-      const table = BigQuery.Tables.get(AIPT_PROJECT_ID, AIPT_DATASET_ID, tableId);
-      fields = ((table.schema && table.schema.fields) || []).map(f => String(f.name || '').toLowerCase());
-      console.log(`[AIPT-BQ] Table ${tableId}: ${fields.length} columns found.`);
-    } catch (e) {
-      return {
-        ok: false,
-        log: `[ERROR] Source table not found: ${AIPT_DATASET_ID}.${tableId}. Please run BigQueryLoader first. (${e.message})`
-      };
+    const tableInfo = _aiptGetTableFieldsWithFallback_(tableId);
+    if (!tableInfo.ok) {
+      return { ok: false, log: tableInfo.log };
     }
+    const fields = tableInfo.fields;
 
     if (key === 'aktionsplan') {
       const ian                     = _pickAiptCol_(fields, ['ian', 'ian_1']);
@@ -546,6 +540,66 @@ function _checkAktionsplanSourceTables_() {
   }
 
   return { ok: true, cols: result };
+}
+
+/**
+ * Resolve table schema fields robustly:
+ * 1) retry Tables.get for transient Empty response errors
+ * 2) fallback to Tables.list for existence verification
+ * 3) if table exists but schema still cannot be read, return actionable diagnostics
+ */
+function _aiptGetTableFieldsWithFallback_(tableId) {
+  let lastErr = null;
+
+  // Retry get twice - Apps Script BigQuery API can sporadically return "Empty response".
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const table = BigQuery.Tables.get(AIPT_PROJECT_ID, AIPT_DATASET_ID, tableId);
+      const fields = ((table.schema && table.schema.fields) || []).map(f => String(f.name || '').toLowerCase());
+      console.log(`[AIPT-BQ] Table ${tableId}: ${fields.length} columns found (via Tables.get, attempt ${attempt}).`);
+      return { ok: true, fields };
+    } catch (e) {
+      lastErr = e;
+      Utilities.sleep(300);
+    }
+  }
+
+  // Fallback: list dataset tables to distinguish "not found" vs temporary API read failure.
+  try {
+    const listResp = BigQuery.Tables.list(AIPT_PROJECT_ID, AIPT_DATASET_ID);
+    const tableNames = ((listResp && listResp.tables) || []).map(t => t.tableReference.tableId);
+    const existsInList = tableNames.indexOf(tableId) !== -1;
+
+    if (!existsInList) {
+      return {
+        ok: false,
+        log: `[ERROR] Source table not found in dataset listing: ${AIPT_DATASET_ID}.${tableId}. ` +
+             `Please run BigQueryLoader first. Available tables: ${tableNames.slice(0, 30).join(', ') || '(none)'}`
+      };
+    }
+
+    // Table exists, try one final schema read for better resiliency.
+    try {
+      const table = BigQuery.Tables.get(AIPT_PROJECT_ID, AIPT_DATASET_ID, tableId);
+      const fields = ((table.schema && table.schema.fields) || []).map(f => String(f.name || '').toLowerCase());
+      console.log(`[AIPT-BQ] Table ${tableId}: ${fields.length} columns found (after list fallback).`);
+      return { ok: true, fields };
+    } catch (e2) {
+      return {
+        ok: false,
+        log: `[ERROR] Source table exists but schema read failed: ${AIPT_DATASET_ID}.${tableId}. ` +
+             `BigQuery.Tables.get returned: ${e2.message}. ` +
+             `Previous error: ${lastErr ? lastErr.message : 'n/a'}`
+      };
+    }
+  } catch (listErr) {
+    return {
+      ok: false,
+      log: `[ERROR] Could not verify source table ${AIPT_DATASET_ID}.${tableId}. ` +
+           `Tables.get failed: ${lastErr ? lastErr.message : 'n/a'}; ` +
+           `Tables.list failed: ${listErr.message}`
+    };
+  }
 }
 
 function _pickAiptCol_(fieldNames, candidates) {

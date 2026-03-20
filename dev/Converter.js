@@ -34,7 +34,7 @@ function onOpen() {
 
   addIfAvailable('Convert Files (CSV)', 'openProgressUI');
   addIfAvailable('Import Ready Files to BigQuery', 'openBQProgressUI');
-  addIfAvailable('Run SQL Transformations (PT + RWA)', 'openTransformUI');
+  addIfAvailable('Execute transformations komplett', 'openTransformUI');
 
   menu.addToUi();
 }

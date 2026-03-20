@@ -89,8 +89,8 @@
         startTimer();
         setStatus('Preparing SQL transformation pipeline...');
         log('> Starting SQL transformation pipeline...', 'log-info');
-        log('> Step 1/3: Export PT', 'log-info');
-        setProgress(0.08);
+        log('> Step 1/4: Export PT', 'log-info');
+        setProgress(0.05);
 
         google.script.run
           .withSuccessHandler(onExportPTCompleted)
@@ -108,8 +108,8 @@
         }
 
         setStatus('Export PT complete. Starting RWA transformation...');
-        log('> Step 2/3: RWA', 'log-info');
-        setProgress(0.38);
+        log('> Step 2/4: RWA', 'log-info');
+        setProgress(0.28);
         isRunning = true;
 
         google.script.run
@@ -128,8 +128,8 @@
         }
 
         setStatus('RWA complete. Starting Aktionsplan INT transformation...');
-        log('> Step 3/3: Aktionsplan INT', 'log-info');
-        setProgress(0.68);
+        log('> Step 3/4: Aktionsplan INT', 'log-info');
+        setProgress(0.54);
         isRunning = true;
 
         google.script.run
@@ -142,10 +142,34 @@
         isRunning = false;
         if (isHalted) return finish(true, false);
 
-        setProgress(1.0);
+        log(result.log, result.success ? 'log-success' : 'log-error');
+        if (!result.success) {
+          return finish(false, true);
+        }
+
+        setStatus('Aktionsplan INT complete. Starting Lagerliste Komplett...');
+        log('> Step 4/4: Lagerliste Komplett', 'log-info');
+        setProgress(0.80);
+        isRunning = true;
+
+        google.script.run
+          .withSuccessHandler(onKomplettCompleted)
+          .withFailureHandler(onFatalError)
+          .runKomplettPowerQuery();
+      }
+
+      function onKomplettCompleted(result) {
+        isRunning = false;
+        if (isHalted) return finish(true, false);
+
         log(result.log, result.success ? 'log-success' : 'log-error');
 
-        finish(false, !result.success);
+        if (!result.success) {
+          return finish(false, true);
+        }
+
+        setProgress(1.0);
+        finish(false, false);
       }
 
       // ── Complete / abort ────────────────────────────────────────────────────
@@ -161,7 +185,7 @@
           setStatus('Completed with errors — review the log above.');
           setProgressStyle('#f38ba8');
         } else {
-          setStatus('Done! Export PT, RWA and Aktionsplan INT queries executed successfully in BigQuery.');
+          setStatus('Done! Export PT, RWA, Aktionsplan INT and Komplett executed successfully in BigQuery.');
           log('> SQL TRANSFORMATION PIPELINE COMPLETE. ✔', 'log-success');
           setProgressStyle('linear-gradient(90deg, #34a853, #a6e3a1)');
         }
