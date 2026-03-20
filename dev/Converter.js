@@ -3,6 +3,26 @@
 // ============================================================================
 const UPLOADS_FOLDER_ID = '1ecRiWJON03Pd0qDNpRxNhTNDsYyw614Z';
 const READY_FOLDER_ID = '16mMxz1DvsIEgKUk4mAXnamwxIQ50ddP5';
+const LARGE_FILE_STAGE_THRESHOLD_BYTES = 45 * 1024 * 1024;
+const SANITIZED_ERROR_CELL_VALUE = '';
+const DATE_DAY_OFFSET = 1;
+const ERROR_CELL_LOG_LIMIT = 200;
+const ERROR_CELL_LOG_FALLBACK_DISPLAY = '(blank-display)';
+
+const SPREADSHEET_ERROR_MARKERS = [
+  '#ERROR!',
+  '#REF!',
+  '#VALUE!',
+  '#N/A',
+  '#DIV/0!',
+  '#NAME?',
+  '#NUM!',
+  '#NULL!',
+  '#WERT!',
+  '#BEZUG!',
+  '#NV',
+  '#ZAHL!'
+];
 
 // NEW: Files that crash Google's converter and need in-memory SheetJS parsing
 const HEAVY_EXCEL_FILES = [
@@ -76,6 +96,7 @@ function processSingleFile(fileObj) {
   const readyFolder = DriveApp.getFolderById(READY_FOLDER_ID);
   const file = DriveApp.getFileById(fileObj.id);
   const lowerName = fileObj.name.toLowerCase();
+  const fileSize = Number(file.getSize() || 0);
   
   let logMessage = "";
   let serverTrace = []; 
@@ -88,6 +109,7 @@ function processSingleFile(fileObj) {
   
   systemLog(`[SERVER] --- STARTING FILE: ${fileObj.name} ---`);
   systemLog(`[SERVER] Received ID: ${fileObj.id} | Type: ${fileObj.mimeType}`);
+  systemLog(`[SERVER] File size: ${fileSize} bytes`);
   
   try {
     // --- SCENARIO A: CSV OR GOOGLE SHEET FILE ---
@@ -110,9 +132,22 @@ function processSingleFile(fileObj) {
       // Check if this file requires our SheetJS bypass engine
       let isHeavyFile = HEAVY_EXCEL_FILES.some(keyword => lowerName.includes(keyword));
       let isXlsb = lowerName.endsWith('.xlsb') || fileObj.mimeType === 'application/vnd.ms-excel.sheet.binary.macroEnabled.12';
+      let shouldStageAsGoogleSheet = fileSize > LARGE_FILE_STAGE_THRESHOLD_BYTES;
+
+      if (shouldStageAsGoogleSheet) {
+        systemLog(`[SERVER] Large workbook detected. Will stage as Google Sheet instead of materializing CSV in Apps Script.`);
+      }
+
+      if (shouldStageAsGoogleSheet && isXlsb) {
+        return {
+          success: false,
+          log: `[ERROR] ${fileObj.name}: XLSB files above ${Math.round(LARGE_FILE_STAGE_THRESHOLD_BYTES / (1024 * 1024))}MB cannot be converted reliably inside Apps Script. Use an external converter or Cloud Run worker for this case.`,
+          trace: serverTrace
+        };
+      }
 
       // --- PATH 1: SHEETJS IN-MEMORY PARSING (Heavy files & .xlsb) ---
-      if (isHeavyFile || isXlsb) {
+      if ((isHeavyFile || isXlsb) && !shouldStageAsGoogleSheet) {
         systemLog(`[SERVER] Detected heavy/binary file. Bypassing Drive API.`);
         systemLog(`[SERVER] Booting up SheetJS In-Memory Engine...`);
 
@@ -130,7 +165,9 @@ function processSingleFile(fileObj) {
           const msg = String(heavyError && heavyError.message || heavyError);
           if (/exceeds the maximum file size|maximum file size|Request Too Large/i.test(msg)) {
             systemLog(`[SERVER] SheetJS path failed due to file size. Falling back to Drive conversion path...`);
-            return convertViaDrivePath_(file, fileObj, csvName, readyFolder, UPLOADS_FOLDER_ID, systemLog, serverTrace);
+            return convertViaDrivePath_(file, fileObj, csvName, readyFolder, UPLOADS_FOLDER_ID, systemLog, serverTrace, {
+              keepAsGoogleSheet: true
+            });
           }
           throw heavyError;
         }
@@ -138,7 +175,9 @@ function processSingleFile(fileObj) {
       
       // --- PATH 2: STANDARD GOOGLE DRIVE API CONVERSION ---
       else {
-        return convertViaDrivePath_(file, fileObj, csvName, readyFolder, UPLOADS_FOLDER_ID, systemLog, serverTrace);
+        return convertViaDrivePath_(file, fileObj, csvName, readyFolder, UPLOADS_FOLDER_ID, systemLog, serverTrace, {
+          keepAsGoogleSheet: shouldStageAsGoogleSheet
+        });
       }
     }
     
@@ -151,7 +190,7 @@ function processSingleFile(fileObj) {
   } catch (error) {
     systemLog(`[SERVER] SYSTEM CRASH: ${error.message}`);
     if (error.message.includes("Request Too Large")) {
-      return { success: false, log: `[ERROR] ${fileObj.name}: File too massive for cloud conversion. MUST be uploaded as CSV.`, trace: serverTrace };
+      return { success: false, log: `[ERROR] ${fileObj.name}: File exceeded Apps Script conversion limits. Stage it as a Google Sheet or process it with an external converter.`, trace: serverTrace };
     }
     return { success: false, log: `[ERROR] ${fileObj.name}: ${error.message}`, trace: serverTrace };
   }
@@ -160,7 +199,8 @@ function processSingleFile(fileObj) {
 // ============================================================================
 // 4. HELPER FUNCTIONS
 // ============================================================================
-function convertToGoogleSheet_(excelFile, folderId) {
+function convertToGoogleSheet_(excelFile, folderId, options) {
+  const settings = options || {};
   const metadata = { name: excelFile.getName(), mimeType: MimeType.GOOGLE_SHEETS, parents: [folderId] };
 
   // Path A: Copy+convert with retries (fastest, but can return transient "Internal Error")
@@ -180,6 +220,11 @@ function convertToGoogleSheet_(excelFile, folderId) {
 
   // Path B: Fallback to insert+convert using media blob
   // This bypasses occasional copy() backend failures for some files.
+  if (settings.skipBlobFallback) {
+    const primaryMsg = String(lastErr && lastErr.message || lastErr || 'unknown');
+    throw new Error(`Drive conversion failed before blob fallback: ${primaryMsg}`);
+  }
+
   try {
     const inserted = Drive.Files.insert(
       metadata,
@@ -243,9 +288,12 @@ function convertHeavyExcelWithSheetJS_(fileId, csvFileName) {
   return Utilities.newBlob(csvString, MimeType.CSV, csvFileName);
 }
 
-function convertViaDrivePath_(file, fileObj, csvName, readyFolder, folderId, systemLog, serverTrace) {
+function convertViaDrivePath_(file, fileObj, csvName, readyFolder, folderId, systemLog, serverTrace, options) {
+  const settings = options || {};
   systemLog(`[SERVER] Instructing Google Drive to convert Excel file...`);
-  let tempSheetId = convertToGoogleSheet_(file, folderId);
+  let tempSheetId = convertToGoogleSheet_(file, folderId, {
+    skipBlobFallback: !!settings.keepAsGoogleSheet
+  });
   systemLog(`[SERVER] Drive API success. Temp Sheet ID: ${tempSheetId}`);
 
   systemLog(`[SERVER] Opening sheet to extract data...`);
@@ -253,25 +301,51 @@ function convertViaDrivePath_(file, fileObj, csvName, readyFolder, folderId, sys
   let sheetToExport = spreadsheet.getSheets()[0];
 
   systemLog(`[SERVER] Targeted first tab: [${sheetToExport.getName()}]`);
+  systemLog(`[SERVER] Timezones => Spreadsheet: ${spreadsheet.getSpreadsheetTimeZone()} | Script: ${Session.getScriptTimeZone()}`);
 
-  // --- QUALITY ASSURANCE: CHECK FOR BROKEN FORMULAS ---
-  systemLog(`[SERVER] Running QA scan for broken formulas...`);
-  let hasError = sheetToExport.createTextFinder("#ERROR!").findNext();
-  let hasRef = sheetToExport.createTextFinder("#REF!").findNext();
+  systemLog(`[SERVER] Sanitizing spreadsheet error cells before downstream export...`);
+  const sanitizeSummary = sanitizeSheetErrorCells_(sheetToExport, systemLog);
+  const sanitizedErrorCells = sanitizeSummary.clearedCells;
+  if (sanitizedErrorCells > 0) {
+    SpreadsheetApp.flush();
+    systemLog(`[SERVER] Replaced ${sanitizedErrorCells} error cells with blanks.`);
 
-  if (hasError || hasRef) {
-    systemLog(`[SERVER] CRITICAL: Found #ERROR! or #REF! inside file.`);
-    DriveApp.getFileById(tempSheetId).setTrashed(true);
+    // Drive conversion can break Excel-only formulas (_xlfn.*, external refs like [1]Sheet0, etc.).
+    // For CSV output, retry via SheetJS to use workbook cached values where available.
+    if (!settings.keepAsGoogleSheet && sanitizeSummary.hasFormulaErrors) {
+      systemLog(`[SERVER] Formula-based spreadsheet errors detected after Drive conversion. Attempting SheetJS fallback for CSV integrity...`);
+      try {
+        const csvBlobFromSheetJs = convertHeavyExcelWithSheetJS_(fileObj.id, csvName);
+        readyFolder.createFile(csvBlobFromSheetJs);
+
+        DriveApp.getFileById(tempSheetId).setTrashed(true);
+        file.setTrashed(true);
+        systemLog(`[SERVER] SheetJS fallback succeeded. Created CSV using workbook cached values.`);
+
+        return {
+          success: true,
+          log: `[SUCCESS] Recovered via SheetJS fallback: ${fileObj.name} -> ${csvName} (detected ${sanitizedErrorCells} formula error cells in Drive conversion)`,
+          trace: serverTrace
+        };
+      } catch (sheetJsFallbackError) {
+        systemLog(`[SERVER] SheetJS fallback failed: ${sheetJsFallbackError.message}. Continuing with sanitized Drive export.`);
+      }
+    }
+  } else {
+    systemLog(`[SERVER] No spreadsheet error markers found.`);
+  }
+
+  if (settings.keepAsGoogleSheet) {
+    systemLog(`[SERVER] Large workbook path selected. Moving sanitized Google Sheet to 02_Ready for BigQuery ingestion.`);
+    DriveApp.getFileById(tempSheetId).moveTo(readyFolder);
     file.setTrashed(true);
-    systemLog(`[SERVER] Trashed temporary sheet and rejected original file.`);
-
+    systemLog(`[SERVER] Original Excel file trashed after successful Google Sheet staging.`);
     return {
-      success: false,
-      log: `[REJECTED] ${fileObj.name}: Contains broken formulas (#ERROR!). Deleted. Please save as CSV locally and re-upload.`,
+      success: true,
+      log: `[SUCCESS] Staged as Google Sheet: ${fileObj.name} -> ${DriveApp.getFileById(tempSheetId).getName()}${sanitizedErrorCells > 0 ? ` (sanitized ${sanitizedErrorCells} error cells)` : ''}`,
       trace: serverTrace
     };
   }
-  systemLog(`[SERVER] QA Passed: No broken formulas detected.`);
 
   systemLog(`[SERVER] Applying minimum 5-decimal formatting to all columns except the first...`);
   applyMinimumDecimalFormatExceptFirstColumn_(sheetToExport);
@@ -315,13 +389,24 @@ function worksheetToCsvPreservingRawValues_(worksheet) {
 function sheetJsRawCellValue_(cell, enforceMinimumDecimals) {
   if (!cell || cell.v == null) return '';
 
+  if (cell.t === 'e') return SANITIZED_ERROR_CELL_VALUE;
+
+  if (cell.t === 'd' && cell.v instanceof Date) {
+    const shiftedDate = shiftYmdByOffset_(cell.v.getUTCFullYear(), cell.v.getUTCMonth() + 1, cell.v.getUTCDate(), DATE_DAY_OFFSET);
+    return formatDatePartsAsMdy_(shiftedDate.year, shiftedDate.month, shiftedDate.day);
+  }
+
+  if (cell.t === 'n' && isSheetJsDateCell_(cell)) {
+    const parsedDate = parseSheetJsDateSerial_(cell.v);
+    if (parsedDate) return parsedDate;
+  }
+
   if (cell.t === 'n') {
     return enforceMinimumDecimals ? formatNumberAtLeast5Decimals_(cell.v) : String(cell.v);
   }
   if (cell.t === 'b') return cell.v ? 'TRUE' : 'FALSE';
-  if (cell.t === 'd' && cell.v instanceof Date) return cell.v.toISOString();
 
-  return String(cell.v);
+  return sanitizeSpreadsheetErrorValue_(String(cell.v));
 }
 
 function applyMinimumDecimalFormatExceptFirstColumn_(sheet) {
@@ -343,9 +428,180 @@ function buildCsvBlobFromSheet_(sheet, fileName) {
     return Utilities.newBlob('', MimeType.CSV, fileName);
   }
 
-  const values = sheet.getRange(1, 1, lastRow, lastColumn).getDisplayValues();
-  const csvString = values.map(row => row.map(escapeCsvValue_).join(',')).join('\n');
+  const range = sheet.getRange(1, 1, lastRow, lastColumn);
+  const values = range.getValues();
+  const formats = range.getNumberFormats();
+  const timezone = resolveSheetTimeZone_(sheet);
+  const csvString = values
+    .map((row, rowIdx) => row
+      .map((value, colIdx) => escapeCsvValue_(normalizeSheetValueForCsv_(value, formats[rowIdx][colIdx], colIdx > 0, timezone)))
+      .join(','))
+    .join('\n');
   return Utilities.newBlob(csvString, MimeType.CSV, fileName);
+}
+
+function sanitizeSheetErrorCells_(sheet, systemLog) {
+  let clearedCells = 0;
+  let loggedCells = 0;
+  let hasFormulaErrors = false;
+
+  const lastRow = sheet.getLastRow();
+  const lastCol = sheet.getLastColumn();
+  if (lastRow === 0 || lastCol === 0) return 0;
+
+  const range = sheet.getRange(1, 1, lastRow, lastCol);
+  const displayValues = range.getDisplayValues();
+  const formulas = range.getFormulas();
+  const a1ToClear = [];
+
+  for (let r = 0; r < lastRow; r++) {
+    for (let c = 0; c < lastCol; c++) {
+      const displayValue = String(displayValues[r][c] == null ? '' : displayValues[r][c]).trim();
+      const marker = detectSpreadsheetErrorMarker_(displayValue);
+      if (!marker) continue;
+
+      const cellRange = sheet.getRange(r + 1, c + 1);
+      const formulaText = formulas[r][c] || '';
+      if (formulaText) hasFormulaErrors = true;
+      if (systemLog && loggedCells < ERROR_CELL_LOG_LIMIT) {
+        const rowKey = String(displayValues[r][0] == null ? '' : displayValues[r][0]).trim();
+        logSpreadsheetErrorCell_(cellRange, marker, systemLog, rowKey, formulaText);
+        loggedCells++;
+      }
+
+      a1ToClear.push(cellRange.getA1Notation());
+      clearedCells++;
+    }
+  }
+
+  if (a1ToClear.length) {
+    sheet.getRangeList(a1ToClear).clearContent();
+  }
+
+  if (systemLog && clearedCells > ERROR_CELL_LOG_LIMIT) {
+    systemLog(`[SERVER][ERROR-CELL] Logged first ${ERROR_CELL_LOG_LIMIT} error cells out of ${clearedCells} total matches.`);
+  }
+
+  return {
+    clearedCells: clearedCells,
+    hasFormulaErrors: hasFormulaErrors
+  };
+}
+
+function logSpreadsheetErrorCell_(cellRange, marker, systemLog, rowKey, formulaFromGrid) {
+  const sheet = cellRange.getSheet();
+  const a1 = cellRange.getA1Notation();
+  const formula = formulaFromGrid || cellRange.getFormula();
+  const displayValue = cellRange.getDisplayValue();
+  const rawValue = cellRange.getValue();
+  const numberFormat = cellRange.getNumberFormat();
+  const effectiveDisplay = displayValue || marker || ERROR_CELL_LOG_FALLBACK_DISPLAY;
+  const formulaPart = formula ? ` formula=${formula}` : ' formula=(none)';
+  const rawPart = rawValue === '' ? ' raw=(blank)' : ` raw=${String(rawValue)}`;
+  const fmtPart = numberFormat ? ` format=${numberFormat}` : ' format=(none)';
+  const keyPart = rowKey ? ` rowKey=${rowKey}` : '';
+
+  systemLog(
+    `[SERVER][ERROR-CELL] ${sheet.getName()}!${a1} marker=${marker} display=${effectiveDisplay}${formulaPart}${rawPart}${fmtPart}${keyPart}`
+  );
+}
+
+function detectSpreadsheetErrorMarker_(displayValue) {
+  const token = String(displayValue == null ? '' : displayValue).trim().toUpperCase();
+  if (!token) return '';
+  if (SPREADSHEET_ERROR_MARKERS.indexOf(token) !== -1) return token;
+  // Generic safety net for localized spreadsheet error tokens (e.g. #WERT!, #BEZUG!, #SPILL!).
+  return /^#\S+$/.test(token) ? token : '';
+}
+
+function normalizeSheetValueForCsv_(value, numberFormat, enforceMinimumDecimals, timezone) {
+  if (value == null) return '';
+  if (value instanceof Date) return formatDateForCsv_(value, timezone);
+  if (typeof value === 'number') {
+    if (isDateLikeNumberFormat_(numberFormat)) {
+      return formatGoogleSheetsSerialDate_(value);
+    }
+    return enforceMinimumDecimals ? formatNumberAtLeast5Decimals_(value) : String(value);
+  }
+  if (typeof value === 'boolean') return value ? 'TRUE' : 'FALSE';
+  return sanitizeSpreadsheetErrorValue_(String(value));
+}
+
+function isSheetJsDateCell_(cell) {
+  if (!cell) return false;
+  if (cell.t === 'd') return true;
+  if (cell.t !== 'n') return false;
+  if (!cell.z || !globalThis.XLSX || !XLSX.SSF || typeof XLSX.SSF.is_date !== 'function') return false;
+  return XLSX.SSF.is_date(cell.z);
+}
+
+function parseSheetJsDateSerial_(serialValue) {
+  if (!globalThis.XLSX || !XLSX.SSF || typeof XLSX.SSF.parse_date_code !== 'function') return '';
+  const parsed = XLSX.SSF.parse_date_code(serialValue);
+  if (!parsed || !parsed.y || !parsed.m || !parsed.d) return '';
+
+  const shiftedDate = shiftYmdByOffset_(parsed.y, parsed.m, parsed.d, DATE_DAY_OFFSET);
+  return formatDatePartsAsMdy_(shiftedDate.year, shiftedDate.month, shiftedDate.day);
+}
+
+function formatDateForCsv_(dateObj, timezone) {
+  // Format in spreadsheet timezone to avoid day shifts from script/runtime timezone.
+  const tz = timezone || Session.getScriptTimeZone() || 'UTC';
+  const year = parseInt(Utilities.formatDate(dateObj, tz, 'yyyy'), 10);
+  const month = parseInt(Utilities.formatDate(dateObj, tz, 'MM'), 10);
+  const day = parseInt(Utilities.formatDate(dateObj, tz, 'dd'), 10);
+  const shiftedDate = shiftYmdByOffset_(year, month, day, DATE_DAY_OFFSET);
+  return formatDatePartsAsMdy_(shiftedDate.year, shiftedDate.month, shiftedDate.day);
+}
+
+function resolveSheetTimeZone_(sheet) {
+  try {
+    return sheet.getParent().getSpreadsheetTimeZone() || Session.getScriptTimeZone() || 'UTC';
+  } catch (e) {
+    return Session.getScriptTimeZone() || 'UTC';
+  }
+}
+
+function isDateLikeNumberFormat_(numberFormat) {
+  const fmt = String(numberFormat == null ? '' : numberFormat).toLowerCase();
+  if (!fmt) return false;
+  const hasDateToken = /(^|[^a-z])(d|dd|ddd|dddd|m|mm|mmm|mmmm|yy|yyyy)([^a-z]|$)/i.test(fmt);
+  const hasTimeOnlyToken = /(^|[^a-z])(h|hh|s|ss)([^a-z]|$)/i.test(fmt) && !/(d|m|y)/i.test(fmt);
+  return hasDateToken && !hasTimeOnlyToken;
+}
+
+function formatGoogleSheetsSerialDate_(serial) {
+  if (typeof serial !== 'number' || !isFinite(serial)) return '';
+  // Google Sheets date serial epoch aligns with 1899-12-30.
+  const millis = Math.round((serial - 25569) * 86400000);
+  const dt = new Date(millis);
+  const shiftedDate = shiftYmdByOffset_(dt.getUTCFullYear(), dt.getUTCMonth() + 1, dt.getUTCDate(), DATE_DAY_OFFSET);
+  return formatDatePartsAsMdy_(shiftedDate.year, shiftedDate.month, shiftedDate.day);
+}
+
+function shiftYmdByOffset_(year, month, day, offsetDays) {
+  const shifted = new Date(Date.UTC(year, month - 1, day + offsetDays));
+  return {
+    year: shifted.getUTCFullYear(),
+    month: shifted.getUTCMonth() + 1,
+    day: shifted.getUTCDate()
+  };
+}
+
+function formatDatePartsAsMdy_(year, month, day) {
+  const mm = String(month).padStart(2, '0');
+  const dd = String(day).padStart(2, '0');
+  const yyyy = String(year).padStart(4, '0');
+  return `${mm}/${dd}/${yyyy}`;
+}
+
+function sanitizeSpreadsheetErrorValue_(value) {
+  const text = String(value == null ? '' : value);
+  return isSpreadsheetErrorMarker_(text) ? SANITIZED_ERROR_CELL_VALUE : text;
+}
+
+function isSpreadsheetErrorMarker_(value) {
+  return SPREADSHEET_ERROR_MARKERS.indexOf(String(value == null ? '' : value).trim()) !== -1;
 }
 
 function formatNumberAtLeast5Decimals_(num) {
