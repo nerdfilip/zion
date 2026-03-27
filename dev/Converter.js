@@ -3,11 +3,13 @@
 // ============================================================================
 const UPLOADS_FOLDER_ID = '1ecRiWJON03Pd0qDNpRxNhTNDsYyw614Z';
 const READY_FOLDER_ID = '16mMxz1DvsIEgKUk4mAXnamwxIQ50ddP5';
-const LARGE_FILE_STAGE_THRESHOLD_BYTES = 45 * 1024 * 1024;
+const LARGE_FILE_STAGE_THRESHOLD_BYTES = 50 * 1024 * 1024;
 const SANITIZED_ERROR_CELL_VALUE = '';
 const DATE_DAY_OFFSET = 1;
 const ERROR_CELL_LOG_LIMIT = 200;
 const ERROR_CELL_LOG_FALLBACK_DISPLAY = '(blank-display)';
+const CHUNK_MAX_ROWS = 200000;
+const SHEETJS_MAX_FILE_BYTES = 100 * 1024 * 1024; // SheetJS + Uint8Array must fit in V8's ~256 MB heap
 
 const SPREADSHEET_ERROR_MARKERS = [
   '#ERROR!',
@@ -133,22 +135,10 @@ function processSingleFile(fileObj) {
       let isHeavyFile = HEAVY_EXCEL_FILES.some(keyword => lowerName.includes(keyword));
       let isXlsb = lowerName.endsWith('.xlsb') || fileObj.mimeType === 'application/vnd.ms-excel.sheet.binary.macroEnabled.12';
       let isRwaFile = lowerName.includes('rwa');
-      let shouldStageAsGoogleSheet = fileSize > LARGE_FILE_STAGE_THRESHOLD_BYTES;
+      let isLargeFile = fileSize > LARGE_FILE_STAGE_THRESHOLD_BYTES;
 
-      if (shouldStageAsGoogleSheet) {
-        systemLog(`[SERVER] Large workbook detected. Will stage as Google Sheet instead of materializing CSV in Apps Script.`);
-      }
-
-      if (shouldStageAsGoogleSheet && isXlsb) {
-        return {
-          success: false,
-          log: `[ERROR] ${fileObj.name}: XLSB files above ${Math.round(LARGE_FILE_STAGE_THRESHOLD_BYTES / (1024 * 1024))}MB cannot be converted reliably inside Apps Script. Use an external converter or Cloud Run worker for this case.`,
-          trace: serverTrace
-        };
-      }
-
-      // --- PATH 1: SHEETJS IN-MEMORY PARSING (Heavy files & .xlsb) ---
-      if ((isHeavyFile || isXlsb) && !shouldStageAsGoogleSheet) {
+      // --- PATH 1: SHEETJS IN-MEMORY PARSING (Heavy/binary files under size threshold) ---
+      if ((isHeavyFile || isXlsb) && !isLargeFile) {
         systemLog(`[SERVER] Detected heavy/binary file. Bypassing Drive API.`);
         systemLog(`[SERVER] Booting up SheetJS In-Memory Engine...`);
 
@@ -173,9 +163,46 @@ function processSingleFile(fileObj) {
           }
           throw heavyError;
         }
-      } 
+      }
+
+      // --- PATH 2: CHUNKED CONVERSION (Large files > 50 MB) ---
+      else if (isLargeFile) {
+        systemLog(`[SERVER] Large file detected (${Math.round(fileSize / (1024 * 1024))}MB > ${Math.round(LARGE_FILE_STAGE_THRESHOLD_BYTES / (1024 * 1024))}MB). Will produce chunked CSV output.`);
+
+        // Try SheetJS chunked parsing — but only when the file fits in V8 memory.
+        // Above SHEETJS_MAX_FILE_BYTES the Uint8Array + parsed workbook would OOM the runtime.
+        if ((isHeavyFile || isXlsb) && fileSize <= SHEETJS_MAX_FILE_BYTES) {
+          try {
+            systemLog(`[SERVER] Attempting SheetJS chunked parsing for heavy/binary file...`);
+            let csvBlobs = convertHeavyExcelInChunks_(fileObj.id, csvName, { forceRwaDecimalStrings: isRwaFile });
+            csvBlobs.forEach(function(b) { readyFolder.createFile(b); });
+            file.setTrashed(true);
+            let chunkNames = csvBlobs.map(function(b) { return b.getName(); }).join(', ');
+            systemLog(`[SERVER] SheetJS chunked conversion complete: ${chunkNames}`);
+            return { success: true, log: `[SUCCESS] SheetJS Chunked: ${fileObj.name} -> ${chunkNames}`, trace: serverTrace };
+          } catch (sheetJsError) {
+            const sjMsg = String(sheetJsError && sheetJsError.message || sheetJsError);
+            if (isXlsb) {
+              systemLog(`[SERVER] SheetJS chunked parsing failed for XLSB: ${sjMsg}`);
+              return { success: false, log: `[ERROR] ${fileObj.name}: XLSB chunked parsing failed: ${sjMsg}`, trace: serverTrace };
+            }
+            systemLog(`[SERVER] SheetJS chunked failed (${sjMsg}). Falling back to Drive conversion with chunked export...`);
+          }
+        }
+
+        // Drive conversion + chunked CSV export
+        if (fileSize > SHEETJS_MAX_FILE_BYTES) {
+          systemLog(`[SERVER] File exceeds SheetJS memory-safe limit (${Math.round(SHEETJS_MAX_FILE_BYTES / (1024 * 1024))}MB). Using server-side Drive conversion.`);
+        }
+        return convertViaDrivePath_(file, fileObj, csvName, readyFolder, UPLOADS_FOLDER_ID, systemLog, serverTrace, {
+          keepAsGoogleSheet: false,
+          forceRwaDecimalStrings: isRwaFile,
+          chunked: true,
+          skipBlobFallback: fileSize > LARGE_FILE_STAGE_THRESHOLD_BYTES
+        });
+      }
       
-      // --- PATH 2: STANDARD GOOGLE DRIVE API CONVERSION ---
+      // --- PATH 3: STANDARD GOOGLE DRIVE API CONVERSION ---
       else {
         return convertViaDrivePath_(file, fileObj, csvName, readyFolder, UPLOADS_FOLDER_ID, systemLog, serverTrace, {
           keepAsGoogleSheet: false,
@@ -229,11 +256,17 @@ function convertToGoogleSheet_(excelFile, folderId, options) {
   }
 
   try {
-    const inserted = Drive.Files.insert(
-      metadata,
-      excelFile.getBlob(),
-      { convert: true, supportsAllDrives: true }
-    );
+    // Try v3 (create) first, fall back to v2 (insert) if it doesn't exist.
+    let inserted;
+    try {
+      inserted = Drive.Files.create(metadata, excelFile.getBlob(), { supportsAllDrives: true });
+    } catch (v3Err) {
+      if (/is not a function|not defined|cannot read/i.test(String(v3Err))) {
+        inserted = Drive.Files.insert(metadata, excelFile.getBlob(), { convert: true, supportsAllDrives: true });
+      } else {
+        throw v3Err;
+      }
+    }
     return inserted.id;
   } catch (fallbackErr) {
     const primaryMsg = String(lastErr && lastErr.message || lastErr || 'unknown');
@@ -294,6 +327,175 @@ function convertHeavyExcelWithSheetJS_(fileId, csvFileName) {
   return Utilities.newBlob(csvString, MimeType.CSV, csvFileName);
 }
 
+/**
+ * Downloads a Drive file as a Uint8Array using byte-range requests.
+ * Each request fetches ≤ 25 MB, staying within UrlFetchApp's response-size
+ * ceiling and bypassing the ~50 MB limit of DriveApp.getBlob().
+ */
+function downloadLargeFileBytes_(fileId) {
+  // DriveApp.getSize() works regardless of which Drive advanced service version is enabled.
+  const fileSize = Number(DriveApp.getFileById(fileId).getSize() || 0);
+  if (!fileSize) throw new Error('Cannot determine file size for range download.');
+
+  const RANGE_CHUNK = 25 * 1024 * 1024;
+  const url = 'https://www.googleapis.com/drive/v3/files/' + fileId + '?alt=media';
+  const token = ScriptApp.getOAuthToken();
+  const result = new Uint8Array(fileSize);
+  let offset = 0;
+
+  while (offset < fileSize) {
+    const end = Math.min(offset + RANGE_CHUNK - 1, fileSize - 1);
+    const resp = UrlFetchApp.fetch(url, {
+      headers: { 'Authorization': 'Bearer ' + token, 'Range': 'bytes=' + offset + '-' + end },
+      muteHttpExceptions: true
+    });
+    const code = resp.getResponseCode();
+    if (code !== 206 && code !== 200) {
+      throw new Error('Range download failed at offset ' + offset + ': HTTP ' + code);
+    }
+    const chunk = resp.getContent();
+    // Uint8Array assignment auto-converts signed Java bytes to unsigned.
+    for (let i = 0; i < chunk.length; i++) {
+      result[offset + i] = chunk[i];
+    }
+    offset += chunk.length;
+  }
+
+  return result;
+}
+
+/**
+ * Like convertHeavyExcelWithSheetJS_ but splits the output into multiple
+ * CSV blobs of at most CHUNK_MAX_ROWS data rows each (headers repeated).
+ * Uses byte-range downloads so files larger than 50 MB are supported.
+ * Returns an array of Blobs.
+ */
+function convertHeavyExcelInChunks_(fileId, csvFileName, options) {
+  const settings = options || {};
+
+  const sheetJSUrl = "https://cdn.sheetjs.com/xlsx-0.19.3/package/dist/xlsx.full.min.js";
+  const scriptText = UrlFetchApp.fetch(sheetJSUrl).getContentText();
+  eval(scriptText);
+  globalThis.XLSX = XLSX;
+
+  // Use range download to bypass the ~50 MB getBlob() limit.
+  const u8 = downloadLargeFileBytes_(fileId);
+  const workbook = XLSX.read(u8, { type: 'array', cellDates: true });
+
+  const firstSheetName = workbook.SheetNames[0];
+  const worksheet = workbook.Sheets[firstSheetName];
+
+  return buildChunkedCsvFromWorksheet_(worksheet, csvFileName, settings);
+}
+
+/**
+ * Splits a SheetJS worksheet into multiple CSV blobs (each with headers).
+ */
+function buildChunkedCsvFromWorksheet_(worksheet, baseFileName, options) {
+  const settings = options || {};
+  const ref = worksheet['!ref'];
+  if (!ref) return [Utilities.newBlob('', MimeType.CSV, baseFileName)];
+
+  const range = XLSX.utils.decode_range(ref);
+
+  // Build header line from first row
+  const headerValues = [];
+  for (let c = range.s.c; c <= range.e.c; c++) {
+    const addr = XLSX.utils.encode_cell({ r: range.s.r, c: c });
+    const cell = worksheet[addr];
+    headerValues.push(escapeCsvValue_(sheetJsRawCellValue_(cell, c > range.s.c, settings)));
+  }
+  const headerLine = headerValues.join(',');
+
+  const dataStartRow = range.s.r + 1;
+  const totalDataRows = range.e.r - dataStartRow + 1;
+  if (totalDataRows <= 0) return [Utilities.newBlob(headerLine, MimeType.CSV, baseFileName)];
+
+  const chunkCount = Math.max(1, Math.ceil(totalDataRows / CHUNK_MAX_ROWS));
+  const blobs = [];
+
+  for (let chunk = 0; chunk < chunkCount; chunk++) {
+    const startRow = dataStartRow + (chunk * CHUNK_MAX_ROWS);
+    const endRow = Math.min(startRow + CHUNK_MAX_ROWS - 1, range.e.r);
+
+    const rows = [headerLine];
+    for (let r = startRow; r <= endRow; r++) {
+      const values = [];
+      for (let c = range.s.c; c <= range.e.c; c++) {
+        const addr = XLSX.utils.encode_cell({ r: r, c: c });
+        const cell = worksheet[addr];
+        values.push(escapeCsvValue_(sheetJsRawCellValue_(cell, c > range.s.c, settings)));
+      }
+      rows.push(values.join(','));
+    }
+
+    const chunkName = chunkCount === 1
+      ? baseFileName
+      : baseFileName.replace(/\.csv$/i, '') + '__chunk_' + (chunk + 1) + '.csv';
+
+    blobs.push(Utilities.newBlob(rows.join('\n'), MimeType.CSV, chunkName));
+  }
+
+  return blobs;
+}
+
+/**
+ * Reads a Google Sheet in row batches and returns multiple CSV blobs
+ * (each with headers) to avoid holding the entire sheet in memory.
+ */
+function buildChunkedCsvBlobsFromSheet_(sheet, baseFileName, options) {
+  const settings = options || {};
+  const lastRow = sheet.getLastRow();
+  const lastColumn = sheet.getLastColumn();
+
+  if (lastRow === 0 || lastColumn === 0) {
+    return [Utilities.newBlob('', MimeType.CSV, baseFileName)];
+  }
+
+  const timezone = resolveSheetTimeZone_(sheet);
+
+  // Read and format header row
+  const headerRange = sheet.getRange(1, 1, 1, lastColumn);
+  const headerValues = headerRange.getValues()[0];
+  const headerFormats = headerRange.getNumberFormats()[0];
+  const headerCsv = headerValues
+    .map(function (v, i) { return escapeCsvValue_(normalizeSheetValueForCsv_(v, headerFormats[i], i > 0, timezone, settings)); })
+    .join(',');
+
+  const totalDataRows = lastRow - 1;
+  if (totalDataRows <= 0) return [Utilities.newBlob(headerCsv, MimeType.CSV, baseFileName)];
+
+  const chunkCount = Math.max(1, Math.ceil(totalDataRows / CHUNK_MAX_ROWS));
+  const blobs = [];
+
+  for (let chunk = 0; chunk < chunkCount; chunk++) {
+    const startRow = 2 + (chunk * CHUNK_MAX_ROWS);
+    const rowsInChunk = Math.min(CHUNK_MAX_ROWS, lastRow - startRow + 1);
+    if (rowsInChunk <= 0) break;
+
+    const dataRange = sheet.getRange(startRow, 1, rowsInChunk, lastColumn);
+    const values = dataRange.getValues();
+    const formats = dataRange.getNumberFormats();
+
+    const lines = [headerCsv];
+    for (let r = 0; r < values.length; r++) {
+      lines.push(
+        values[r]
+          .map(function (v, c) { return escapeCsvValue_(normalizeSheetValueForCsv_(v, formats[r][c], c > 0, timezone, settings)); })
+          .join(',')
+      );
+    }
+
+    const chunkName = chunkCount === 1
+      ? baseFileName
+      : baseFileName.replace(/\.csv$/i, '') + '__chunk_' + (chunk + 1) + '.csv';
+
+    blobs.push(Utilities.newBlob(lines.join('\n'), MimeType.CSV, chunkName));
+  }
+
+  return blobs;
+}
+
 function convertViaDrivePath_(file, fileObj, csvName, readyFolder, folderId, systemLog, serverTrace, options) {
   const settings = options || {};
   systemLog(`[SERVER] Instructing Google Drive to convert Excel file...`);
@@ -346,6 +548,24 @@ function convertViaDrivePath_(file, fileObj, csvName, readyFolder, folderId, sys
   SpreadsheetApp.flush();
 
   // Export as CSV
+  if (settings.chunked) {
+    systemLog(`[SERVER] Rendering chunked CSV output (max ${CHUNK_MAX_ROWS} rows per chunk)...`);
+    let csvBlobs = buildChunkedCsvBlobsFromSheet_(sheetToExport, csvName, {
+      forceRwaDecimalStrings: !!settings.forceRwaDecimalStrings
+    });
+    csvBlobs.forEach(function(b) { readyFolder.createFile(b); });
+    let chunkNames = csvBlobs.map(function(b) { return b.getName(); }).join(', ');
+    systemLog(`[SERVER] Created ${csvBlobs.length} CSV chunk(s): ${chunkNames}`);
+
+    // Clean up files
+    systemLog(`[SERVER] Cleaning up origin files...`);
+    DriveApp.getFileById(tempSheetId).setTrashed(true);
+    file.setTrashed(true);
+    systemLog(`[SERVER] Cleanup complete. Process finished.`);
+
+    return { success: true, log: `[SUCCESS] Converted (chunked): ${fileObj.name} -> ${chunkNames}`, trace: serverTrace };
+  }
+
   systemLog(`[SERVER] Rendering CSV from sheet display values...`);
   let csvBlob = buildCsvBlobFromSheet_(sheetToExport, csvName, {
     forceRwaDecimalStrings: !!settings.forceRwaDecimalStrings

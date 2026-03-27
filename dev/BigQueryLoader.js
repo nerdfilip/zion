@@ -281,21 +281,59 @@ function buildRawHeaders_(parsedRows, lineRows, fileDelimiter, headerRow, header
   return headers;
 }
 
-// --- UPDATED: Now fetches both CSV and Google Sheets ---
+// --- UPDATED: Now fetches both CSV and Google Sheets, groups chunked files ---
 function getReadyFiles() {
   const folder = DriveApp.getFolderById(READY_FOLDER_ID);
   const files = folder.getFiles();
-  let fileList = [];
+  let rawList = [];
   
   while (files.hasNext()) {
     let f = files.next();
     let mime = f.getMimeType();
     
     if (mime === MimeType.CSV || mime === MimeType.GOOGLE_SHEETS || mime === 'text/csv') {
-      fileList.push({ id: f.getId(), name: f.getName(), mimeType: mime });
+      rawList.push({ id: f.getId(), name: f.getName(), mimeType: mime });
     }
   }
-  return fileList; 
+  return groupChunkedFiles_(rawList);
+}
+
+/**
+ * Groups __chunk_N files by their base name so they are processed as one
+ * logical import. Standalone files pass through unchanged.
+ */
+function groupChunkedFiles_(fileList) {
+  var CHUNK_PATTERN = /__chunk_(\d+)\.csv$/i;
+  var groups = {};
+  var standalone = [];
+
+  for (var i = 0; i < fileList.length; i++) {
+    var f = fileList[i];
+    var match = f.name.match(CHUNK_PATTERN);
+
+    if (match) {
+      var baseName = f.name.replace(CHUNK_PATTERN, '.csv');
+      if (!groups[baseName]) groups[baseName] = [];
+      groups[baseName].push({ file: f, index: parseInt(match[1], 10) });
+    } else {
+      standalone.push(f);
+    }
+  }
+
+  var result = standalone.slice();
+
+  Object.keys(groups).forEach(function (baseName) {
+    var sorted = groups[baseName].sort(function (a, b) { return a.index - b.index; });
+    var parts = sorted.map(function (s) { return s.file; });
+    result.push({
+      id: parts[0].id,
+      name: baseName,
+      mimeType: parts[0].mimeType,
+      parts: parts
+    });
+  });
+
+  return result;
 }
 
 // ============================================================================
@@ -441,6 +479,15 @@ function processSingleBQFile(fileObj) {
   if (specialOptions.headerRow) headerRow = specialOptions.headerRow;
   if (specialOptions.dataRow) dataRow = specialOptions.dataRow;
 
+  // Chunked CSV files are already normalized: header row 1, data row 2, comma-delimited.
+  let isChunked = !!(fileObj.parts && fileObj.parts.length > 0);
+  if (isChunked) {
+    headerRow = 1;
+    dataRow = 2;
+    forcedDelimiter = null;
+    console.log(`[SERVER] Chunked import detected (${fileObj.parts.length} parts). Using normalized CSV defaults.`);
+  }
+
   let tableName = cleanTableName(fileObj.name);
   let tempTableId = tableName + '_temp_ext'; 
   console.log(`[SERVER] Target Table: ${tableName}`);
@@ -457,9 +504,18 @@ function processSingleBQFile(fileObj) {
     let ghostSchemaFields = finalSchema.map(f => ({ name: f.name, type: 'STRING' }));
     let isSheet = fileObj.mimeType === MimeType.GOOGLE_SHEETS;
 
-    // --- UPDATED: Tell BigQuery whether it is looking at a CSV or a Google Sheet ---
+    // Build source URIs – chunked imports pass all parts so BQ reads them as one table.
+    let sourceUris;
+    if (isChunked) {
+      sourceUris = fileObj.parts.map(function(p) { return 'https://drive.google.com/open?id=' + p.id; });
+    } else if (isSheet) {
+      sourceUris = [`https://docs.google.com/spreadsheets/d/${fileObj.id}`];
+    } else {
+      sourceUris = [`https://drive.google.com/open?id=${fileObj.id}`];
+    }
+
     let externalDataConfiguration = {
-      sourceUris: isSheet ? [`https://docs.google.com/spreadsheets/d/${fileObj.id}`] : [`https://drive.google.com/open?id=${fileObj.id}`],
+      sourceUris: sourceUris,
       sourceFormat: isSheet ? "GOOGLE_SHEETS" : "CSV",
       autodetect: false
     };
@@ -595,8 +651,12 @@ function processSingleBQFile(fileObj) {
     try { BigQuery.Tables.remove(GCP_PROJECT_ID, DATASET_ID, tempTableId); } catch(e) {}
     
     if (success) {
-      console.log(`[SUCCESS] BigQuery import successful. Moving file to Archive...`);
-      file.moveTo(archiveFolder);
+      console.log(`[SUCCESS] BigQuery import successful. Moving file(s) to Archive...`);
+      if (isChunked) {
+        fileObj.parts.forEach(function(p) { DriveApp.getFileById(p.id).moveTo(archiveFolder); });
+      } else {
+        file.moveTo(archiveFolder);
+      }
       return { success: true, log: `[SUCCESS] Injected into '${tableName}'. Moved to Archive.` };
     } else if (errorMsg) {
       console.error(`[CRASH] BigQuery rejected the file: ${errorMsg}`);
