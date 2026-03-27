@@ -2,7 +2,7 @@
 // CONFIGURATION: AKTIONSPLAN INT PQ QUERY PIPELINE
 // ============================================================================
 const AIPT_PROJECT_ID = 'sit-ldl-int-oi-a-lvzt-run-818b';
-const AIPT_DATASET_ID = 'lagerliste_imports';
+const AIPT_DATASET_ID = 'imports';
 const AIPT_TABLE_ID   = 'aktionsplan_int_pq';
 
 // Source tables created by BigQueryLoader (name = cleanTableName(filename)):

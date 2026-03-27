@@ -39,7 +39,7 @@ const HEAVY_EXCEL_FILES = [
 // ============================================================================
 function onOpen() {
   const ui = SpreadsheetApp.getUi();
-  const menu = ui.createMenu('Lagerliste');
+  const menu = ui.createMenu('Makro');
   let itemNumber = 1;
 
   function addIfAvailable(label, functionName) {
@@ -54,7 +54,7 @@ function onOpen() {
 
   addIfAvailable('Convert Files (CSV)', 'openProgressUI');
   addIfAvailable('Import Ready Files to BigQuery', 'openBQProgressUI');
-  addIfAvailable('Execute transformations komplett', 'openTransformUI');
+  addIfAvailable('Execute transformations (Lagerliste)', 'openTransformUI');
 
   menu.addToUi();
 }
@@ -132,6 +132,7 @@ function processSingleFile(fileObj) {
       // Check if this file requires our SheetJS bypass engine
       let isHeavyFile = HEAVY_EXCEL_FILES.some(keyword => lowerName.includes(keyword));
       let isXlsb = lowerName.endsWith('.xlsb') || fileObj.mimeType === 'application/vnd.ms-excel.sheet.binary.macroEnabled.12';
+      let isRwaFile = lowerName.includes('rwa');
       let shouldStageAsGoogleSheet = fileSize > LARGE_FILE_STAGE_THRESHOLD_BYTES;
 
       if (shouldStageAsGoogleSheet) {
@@ -166,7 +167,8 @@ function processSingleFile(fileObj) {
           if (/exceeds the maximum file size|maximum file size|Request Too Large/i.test(msg)) {
             systemLog(`[SERVER] SheetJS path failed due to file size. Falling back to Drive conversion path...`);
             return convertViaDrivePath_(file, fileObj, csvName, readyFolder, UPLOADS_FOLDER_ID, systemLog, serverTrace, {
-              keepAsGoogleSheet: true
+              keepAsGoogleSheet: false,
+              forceRwaDecimalStrings: isRwaFile
             });
           }
           throw heavyError;
@@ -176,7 +178,8 @@ function processSingleFile(fileObj) {
       // --- PATH 2: STANDARD GOOGLE DRIVE API CONVERSION ---
       else {
         return convertViaDrivePath_(file, fileObj, csvName, readyFolder, UPLOADS_FOLDER_ID, systemLog, serverTrace, {
-          keepAsGoogleSheet: shouldStageAsGoogleSheet
+          keepAsGoogleSheet: false,
+          forceRwaDecimalStrings: isRwaFile
         });
       }
     }
@@ -282,7 +285,10 @@ function convertHeavyExcelWithSheetJS_(fileId, csvFileName) {
   
   // 6. Convert the sheet to CSV using raw cell values (cell.v) instead of 
   // the display-formatted values (cell.w) to preserve full numeric precision.
-  const csvString = worksheetToCsvPreservingRawValues_(worksheet); 
+  const isRwaFile = String(csvFileName || '').toLowerCase().includes('rwa');
+  const csvString = worksheetToCsvPreservingRawValues_(worksheet, {
+    forceRwaDecimalStrings: isRwaFile
+  }); 
   
   // 7. Package it as a Blob ready to be saved
   return Utilities.newBlob(csvString, MimeType.CSV, csvFileName);
@@ -335,25 +341,15 @@ function convertViaDrivePath_(file, fileObj, csvName, readyFolder, folderId, sys
     systemLog(`[SERVER] No spreadsheet error markers found.`);
   }
 
-  if (settings.keepAsGoogleSheet) {
-    systemLog(`[SERVER] Large workbook path selected. Moving sanitized Google Sheet to 02_Ready for BigQuery ingestion.`);
-    DriveApp.getFileById(tempSheetId).moveTo(readyFolder);
-    file.setTrashed(true);
-    systemLog(`[SERVER] Original Excel file trashed after successful Google Sheet staging.`);
-    return {
-      success: true,
-      log: `[SUCCESS] Staged as Google Sheet: ${fileObj.name} -> ${DriveApp.getFileById(tempSheetId).getName()}${sanitizedErrorCells > 0 ? ` (sanitized ${sanitizedErrorCells} error cells)` : ''}`,
-      trace: serverTrace
-    };
-  }
-
   systemLog(`[SERVER] Applying minimum 5-decimal formatting to all columns except the first...`);
   applyMinimumDecimalFormatExceptFirstColumn_(sheetToExport);
   SpreadsheetApp.flush();
 
   // Export as CSV
   systemLog(`[SERVER] Rendering CSV from sheet display values...`);
-  let csvBlob = buildCsvBlobFromSheet_(sheetToExport, csvName);
+  let csvBlob = buildCsvBlobFromSheet_(sheetToExport, csvName, {
+    forceRwaDecimalStrings: !!settings.forceRwaDecimalStrings
+  });
   systemLog(`[SERVER] CSV Blob generated. Writing to 02_Ready folder...`);
   readyFolder.createFile(csvBlob);
 
@@ -366,7 +362,8 @@ function convertViaDrivePath_(file, fileObj, csvName, readyFolder, folderId, sys
   return { success: true, log: `[SUCCESS] Converted: ${fileObj.name} -> ${csvName}`, trace: serverTrace };
 }
 
-function worksheetToCsvPreservingRawValues_(worksheet) {
+function worksheetToCsvPreservingRawValues_(worksheet, options) {
+  const settings = options || {};
   const ref = worksheet['!ref'];
   if (!ref) return '';
 
@@ -378,7 +375,7 @@ function worksheetToCsvPreservingRawValues_(worksheet) {
     for (let colIndex = range.s.c; colIndex <= range.e.c; colIndex++) {
       const address = XLSX.utils.encode_cell({ r: rowIndex, c: colIndex });
       const cell = worksheet[address];
-      values.push(escapeCsvValue_(sheetJsRawCellValue_(cell, colIndex > range.s.c)));
+      values.push(escapeCsvValue_(sheetJsRawCellValue_(cell, colIndex > range.s.c, settings)));
     }
     rows.push(values.join(','));
   }
@@ -386,7 +383,8 @@ function worksheetToCsvPreservingRawValues_(worksheet) {
   return rows.join('\n');
 }
 
-function sheetJsRawCellValue_(cell, enforceMinimumDecimals) {
+function sheetJsRawCellValue_(cell, enforceMinimumDecimals, options) {
+  const settings = options || {};
   if (!cell || cell.v == null) return '';
 
   if (cell.t === 'e') return SANITIZED_ERROR_CELL_VALUE;
@@ -402,6 +400,9 @@ function sheetJsRawCellValue_(cell, enforceMinimumDecimals) {
   }
 
   if (cell.t === 'n') {
+    if (settings.forceRwaDecimalStrings) {
+      return normalizeBigNumericString_(cell.v);
+    }
     return enforceMinimumDecimals ? formatNumberAtLeast5Decimals_(cell.v) : String(cell.v);
   }
   if (cell.t === 'b') return cell.v ? 'TRUE' : 'FALSE';
@@ -420,7 +421,8 @@ function applyMinimumDecimalFormatExceptFirstColumn_(sheet) {
   sheet.getRange(1, 2, lastRow, lastColumn - 1).setNumberFormat('0.00000###############');
 }
 
-function buildCsvBlobFromSheet_(sheet, fileName) {
+function buildCsvBlobFromSheet_(sheet, fileName, options) {
+  const settings = options || {};
   const lastRow = sheet.getLastRow();
   const lastColumn = sheet.getLastColumn();
 
@@ -434,7 +436,7 @@ function buildCsvBlobFromSheet_(sheet, fileName) {
   const timezone = resolveSheetTimeZone_(sheet);
   const csvString = values
     .map((row, rowIdx) => row
-      .map((value, colIdx) => escapeCsvValue_(normalizeSheetValueForCsv_(value, formats[rowIdx][colIdx], colIdx > 0, timezone)))
+      .map((value, colIdx) => escapeCsvValue_(normalizeSheetValueForCsv_(value, formats[rowIdx][colIdx], colIdx > 0, timezone, settings)))
       .join(','))
     .join('\n');
   return Utilities.newBlob(csvString, MimeType.CSV, fileName);
@@ -514,12 +516,16 @@ function detectSpreadsheetErrorMarker_(displayValue) {
   return /^#\S+$/.test(token) ? token : '';
 }
 
-function normalizeSheetValueForCsv_(value, numberFormat, enforceMinimumDecimals, timezone) {
+function normalizeSheetValueForCsv_(value, numberFormat, enforceMinimumDecimals, timezone, options) {
+  const settings = options || {};
   if (value == null) return '';
   if (value instanceof Date) return formatDateForCsv_(value, timezone);
   if (typeof value === 'number') {
     if (isDateLikeNumberFormat_(numberFormat)) {
       return formatGoogleSheetsSerialDate_(value);
+    }
+    if (settings.forceRwaDecimalStrings) {
+      return normalizeBigNumericString_(value);
     }
     return enforceMinimumDecimals ? formatNumberAtLeast5Decimals_(value) : String(value);
   }
@@ -586,6 +592,24 @@ function shiftYmdByOffset_(year, month, day, offsetDays) {
     month: shifted.getUTCMonth() + 1,
     day: shifted.getUTCDate()
   };
+}
+
+function normalizeBigNumericString_(value) {
+  let str = String(value == null ? '' : value).trim();
+  if (!str) return '';
+
+  str = str.replace(/\s+/g, '');
+  if (/[eE]/.test(str)) {
+    str = formatNumberAtLeast5Decimals_(Number(str));
+  }
+
+  if (str.indexOf(',') !== -1 && str.indexOf('.') !== -1) {
+    str = str.replace(/,/g, '');
+  } else if (str.indexOf(',') !== -1) {
+    str = str.replace(/\./g, '').replace(/,/g, '.');
+  }
+
+  return str;
 }
 
 function formatDatePartsAsMdy_(year, month, day) {

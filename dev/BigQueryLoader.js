@@ -2,7 +2,7 @@
 // CONFIGURATION: BIGQUERY & FOLDERS
 // ============================================================================
 const GCP_PROJECT_ID = 'sit-ldl-int-oi-a-lvzt-run-818b'; 
-const DATASET_ID = 'lagerliste_imports'; 
+const DATASET_ID = 'imports'; 
 const ARCHIVE_FOLDER_ID = '1IOrUiTS_xXb69EBUcb8rqPSbUhQKjugO'; 
 // const READY_FOLDER_ID = '16mMxz1DvsIEgKUk4mAXnamwxIQ50ddP5';
 
@@ -12,6 +12,29 @@ const FILE_RULES = [
   { keyword: "bäf_de",                         headerRow: 7, dataRow: 9 }, 
   { keyword: "osnl",                           headerRow: 1, dataRow: 2 },
   { keyword: "rwa",                            headerRow: 3, dataRow: 4 }
+];
+
+const FILE_SPECIAL_OPTIONS = [
+  {
+    keyword: "artikelkette",
+    keepColumnIndexes: [0, 1],
+    typeOverrides: { artikelkette: "STRING" }
+  },
+  {
+    keyword: "ganzjahresartikel",
+    keepColumnIndexes: [0, 1, 2]
+  },
+  {
+    keyword: "reporting",
+    headerRow: 3,
+    dataRow: 5,
+    headerRowByColumn: { 0: 4 },
+    typeOverrides: { standortcode: "STRING", 
+                     kommentar: "STRING", 
+                     kommentar_1: "STRING", 
+                     kommentar_2: "STRING" 
+                     }
+  }
 ];
 
 const TYPE_OVERRIDES = {
@@ -28,7 +51,9 @@ const TYPE_OVERRIDES = {
   "rwa_pro_st_ck": "BIGNUMERIC",
   "rwa_pro_stueck": "BIGNUMERIC",
   "aktions_vk": "NUMERIC",
-  "sortiment_vk_lidl": "NUMERIC", 
+  "sortiment_vk_lidl": "NUMERIC",
+  "name": "STRING",
+  "kw": "STRING"
 };
 
 const HEADER_TYPE_RULES = [
@@ -106,6 +131,19 @@ function normalizeNumberish_(value, fileDelimiter) {
   return v.replace(/,/g, '');
 }
 
+function isDateLikeValue_(rawValue) {
+  const raw = String(rawValue || '').trim();
+  if (!raw) return false;
+
+  // ISO variants with optional time (e.g. 2026-03-27 or 2026-03-27T11:22:33).
+  if (/^\d{4}[-\/.]\d{1,2}[-\/.]\d{1,2}(?:[ T].*)?$/.test(raw)) return true;
+
+  // Day-first / month-first variants using slash, dot or dash separators.
+  if (/^\d{1,2}[-\/.]\d{1,2}[-\/.]\d{2,4}(?:[ T].*)?$/.test(raw)) return true;
+
+  return false;
+}
+
 function inferDataTypeFromSamples_(samples, fileDelimiter) {
   const values = (samples || [])
     .map(v => String(v == null ? '' : v).trim())
@@ -129,7 +167,7 @@ function inferDataTypeFromSamples_(samples, fileDelimiter) {
       continue;
     }
 
-    if (/^\d{4}-\d{2}-\d{2}$/.test(raw) || /^\d{1,2}[./]\d{1,2}[./]\d{4}$/.test(raw)) {
+    if (isDateLikeValue_(raw)) {
       dateCount++;
       continue;
     }
@@ -168,6 +206,79 @@ function resolveColumnType_(headerName, sampleValues, fileDelimiter) {
   const byHeader = inferDataTypeFromHeader_(headerName);
   if (byHeader) return byHeader;
   return inferDataTypeFromSamples_(sampleValues, fileDelimiter);
+}
+
+function resolveColumnTypeWithOverrides_(headerName, sampleValues, fileDelimiter, typeOverrides) {
+  const key = String(headerName || '').toLowerCase();
+  if (typeOverrides && typeOverrides[key]) return typeOverrides[key];
+  return resolveColumnType_(headerName, sampleValues, fileDelimiter);
+}
+
+function getSpecialFileOptions_(lowerName) {
+  for (let i = 0; i < FILE_SPECIAL_OPTIONS.length; i++) {
+    if (lowerName.includes(FILE_SPECIAL_OPTIONS[i].keyword)) return FILE_SPECIAL_OPTIONS[i];
+  }
+  return null;
+}
+
+function columnIndexToA1_(columnIndex) {
+  let index = Number(columnIndex);
+  if (!Number.isFinite(index) || index < 0) return null;
+
+  let result = '';
+  while (index >= 0) {
+    result = String.fromCharCode((index % 26) + 65) + result;
+    index = Math.floor(index / 26) - 1;
+  }
+  return result;
+}
+
+function buildSheetRangeFromColumnIndexes_(indexes) {
+  if (!indexes || !indexes.length) return null;
+
+  let normalized = indexes
+    .map(n => Number(n))
+    .filter(n => Number.isInteger(n) && n >= 0)
+    .sort((a, b) => a - b);
+
+  if (!normalized.length) return null;
+
+  for (let i = 1; i < normalized.length; i++) {
+    if (normalized[i] !== normalized[i - 1] + 1) return null;
+  }
+
+  let start = columnIndexToA1_(normalized[0]);
+  let end = columnIndexToA1_(normalized[normalized.length - 1]);
+  if (!start || !end) return null;
+  return `${start}:${end}`;
+}
+
+function buildRawHeaders_(parsedRows, lineRows, fileDelimiter, headerRow, headerRowByColumn, keepColumnIndexes) {
+  let baseHeaders = parsedRows && parsedRows.length
+    ? (parsedRows[headerRow - 1] || [])
+    : String(lineRows[headerRow - 1] || '').split(fileDelimiter);
+
+  let headers = baseHeaders.slice();
+
+  if (headerRowByColumn) {
+    Object.keys(headerRowByColumn).forEach(k => {
+      let colIndex = Number(k);
+      let rowNumber = Number(headerRowByColumn[k]);
+      if (!Number.isInteger(colIndex) || !Number.isInteger(rowNumber) || rowNumber <= 0) return;
+
+      let overrideRow = parsedRows && parsedRows.length
+        ? (parsedRows[rowNumber - 1] || [])
+        : String(lineRows[rowNumber - 1] || '').split(fileDelimiter);
+
+      headers[colIndex] = overrideRow[colIndex] || '';
+    });
+  }
+
+  if (keepColumnIndexes && keepColumnIndexes.length) {
+    headers = keepColumnIndexes.map(idx => (headers[idx] != null ? headers[idx] : ''));
+  }
+
+  return headers;
 }
 
 // --- UPDATED: Now fetches both CSV and Google Sheets ---
@@ -210,7 +321,7 @@ function cleanTableName(fileName) {
 // 2. SCHEMA DETECTOR WITH SMART PROFILING
 // ============================================================================
 // --- UPDATED: Added mimeType parameter to handle Google Sheets ---
-function buildDynamicSchema(fileId, headerRow, dataRow, forcedDelimiter, projectId, datasetId, mimeType) {
+function buildDynamicSchema(fileId, headerRow, dataRow, forcedDelimiter, projectId, datasetId, mimeType, specialOptions) {
   console.log(`[SCHEMA] Phase 1: Fetching file ID ${fileId} from Drive...`);
   
   let url;
@@ -230,6 +341,10 @@ function buildDynamicSchema(fileId, headerRow, dataRow, forcedDelimiter, project
   console.log(`[SCHEMA] Phase 2: Parsing CSV text...`);
   let rawText = response.getContentText();
   let lines = rawText.split(/\r?\n/);
+  const opts = specialOptions || {};
+  const keepColumnIndexes = opts.keepColumnIndexes || null;
+  const headerRowByColumn = opts.headerRowByColumn || null;
+  const typeOverrides = opts.typeOverrides || null;
   
   // Smart Delimiter Detection
   let fileDelimiter = forcedDelimiter;
@@ -245,11 +360,17 @@ function buildDynamicSchema(fileId, headerRow, dataRow, forcedDelimiter, project
   let sampleRows = [];
   try { 
     let parsed = Utilities.parseCsv(rawText, fileDelimiter); 
-    rawHeaders = parsed[headerRow - 1] || [];
+    rawHeaders = buildRawHeaders_(parsed, lines, fileDelimiter, headerRow, headerRowByColumn, keepColumnIndexes);
     sampleRows = parsed.slice(dataRow - 1, Math.min(parsed.length, dataRow - 1 + 40));
+    if (keepColumnIndexes && keepColumnIndexes.length) {
+      sampleRows = sampleRows.map(r => keepColumnIndexes.map(idx => (r && r[idx] != null ? r[idx] : '')));
+    }
   } catch(e) { 
-    rawHeaders = (lines[headerRow - 1] || "").split(fileDelimiter); 
-    const fallback = (lines[dataRow - 1] || "").split(fileDelimiter);
+    rawHeaders = buildRawHeaders_(null, lines, fileDelimiter, headerRow, headerRowByColumn, keepColumnIndexes);
+    let fallback = (lines[dataRow - 1] || "").split(fileDelimiter);
+    if (keepColumnIndexes && keepColumnIndexes.length) {
+      fallback = keepColumnIndexes.map(idx => (fallback[idx] != null ? fallback[idx] : ''));
+    }
     sampleRows = [fallback];
   }
 
@@ -278,7 +399,7 @@ function buildDynamicSchema(fileId, headerRow, dataRow, forcedDelimiter, project
   for(let i = 0; i < englishHeaders.length; i++) {
     let colName = englishHeaders[i];
     let sampleValues = sampleRows.map(r => (r && r[i] != null ? r[i] : ''));
-    let detectedType = resolveColumnType_(colName, sampleValues, fileDelimiter);
+    let detectedType = resolveColumnTypeWithOverrides_(colName, sampleValues, fileDelimiter, typeOverrides);
     if (TYPE_OVERRIDES[colName]) {
       console.log(`   -> Exact override: ${colName} => ${detectedType}`);
     }
@@ -305,6 +426,7 @@ function processSingleBQFile(fileObj) {
   let headerRow = 1; 
   let dataRow = 2;
   let forcedDelimiter = null; 
+  let specialOptions = getSpecialFileOptions_(lowerName) || {};
   
   for (let i = 0; i < FILE_RULES.length; i++) {
     if (lowerName.includes(FILE_RULES[i].keyword)) {
@@ -316,6 +438,9 @@ function processSingleBQFile(fileObj) {
     }
   }
 
+  if (specialOptions.headerRow) headerRow = specialOptions.headerRow;
+  if (specialOptions.dataRow) dataRow = specialOptions.dataRow;
+
   let tableName = cleanTableName(fileObj.name);
   let tempTableId = tableName + '_temp_ext'; 
   console.log(`[SERVER] Target Table: ${tableName}`);
@@ -324,7 +449,7 @@ function processSingleBQFile(fileObj) {
     console.log(`[SERVER] Cleaning up old temp tables...`);
     try { BigQuery.Tables.remove(GCP_PROJECT_ID, DATASET_ID, tempTableId); } catch (e) { }
 
-    let schemaData = buildDynamicSchema(fileObj.id, headerRow, dataRow, forcedDelimiter, GCP_PROJECT_ID, DATASET_ID, fileObj.mimeType);
+    let schemaData = buildDynamicSchema(fileObj.id, headerRow, dataRow, forcedDelimiter, GCP_PROJECT_ID, DATASET_ID, fileObj.mimeType, specialOptions);
     let finalSchema = schemaData.schema;
     let fileDelimiter = schemaData.delimiter;
 
@@ -339,8 +464,14 @@ function processSingleBQFile(fileObj) {
       autodetect: false
     };
 
+    if (specialOptions.keepColumnIndexes && specialOptions.keepColumnIndexes.length) {
+      externalDataConfiguration.ignoreUnknownValues = true;
+    }
+
     if (isSheet) {
       externalDataConfiguration.googleSheetsOptions = { skipLeadingRows: dataRow - 1 };
+      let limitedRange = buildSheetRangeFromColumnIndexes_(specialOptions.keepColumnIndexes || []);
+      if (limitedRange) externalDataConfiguration.googleSheetsOptions.range = limitedRange;
     } else {
       externalDataConfiguration.csvOptions = { skipLeadingRows: dataRow - 1, allowQuotedNewlines: true, fieldDelimiter: fileDelimiter };
     }
@@ -384,11 +515,26 @@ function processSingleBQFile(fileObj) {
         }
       } 
       else if (sqlType === 'DATE') {
+        // Support multiple date layouts: ISO, dd/MM/yyyy, MM/dd/yyyy, dd.MM.yyyy,
+        // MM-dd-yyyy and 2-digit year variants while staying safe for malformed values.
         return `
           COALESCE(
             SAFE_CAST(SUBSTR(${cleanStr}, 1, 10) AS DATE),
+            SAFE.PARSE_DATE('%Y/%m/%d', REGEXP_EXTRACT(${cleanStr}, r'^[0-9]{4}/[0-9]{1,2}/[0-9]{1,2}')),
+            SAFE.PARSE_DATE('%Y.%m.%d', REGEXP_EXTRACT(${cleanStr}, r'^[0-9]{4}\\.[0-9]{1,2}\\.[0-9]{1,2}')),
+            SAFE.PARSE_DATE('%Y-%m-%d', REGEXP_EXTRACT(${cleanStr}, r'^[0-9]{4}-[0-9]{1,2}-[0-9]{1,2}')),
+            SAFE.PARSE_DATE('%d/%m/%Y', REGEXP_EXTRACT(${cleanStr}, r'^[0-9]{1,2}/[0-9]{1,2}/[0-9]{4}')),
+            SAFE.PARSE_DATE('%m/%d/%Y', REGEXP_EXTRACT(${cleanStr}, r'^[0-9]{1,2}/[0-9]{1,2}/[0-9]{4}')),
             SAFE.PARSE_DATE('%d.%m.%Y', REGEXP_EXTRACT(${cleanStr}, r'^[0-9]{1,2}\\.[0-9]{1,2}\\.[0-9]{4}')),
-            SAFE.PARSE_DATE('%d/%m/%Y', REGEXP_EXTRACT(${cleanStr}, r'^[0-9]{1,2}/[0-9]{1,2}/[0-9]{4}'))
+            SAFE.PARSE_DATE('%m.%d.%Y', REGEXP_EXTRACT(${cleanStr}, r'^[0-9]{1,2}\\.[0-9]{1,2}\\.[0-9]{4}')),
+            SAFE.PARSE_DATE('%d-%m-%Y', REGEXP_EXTRACT(${cleanStr}, r'^[0-9]{1,2}-[0-9]{1,2}-[0-9]{4}')),
+            SAFE.PARSE_DATE('%m-%d-%Y', REGEXP_EXTRACT(${cleanStr}, r'^[0-9]{1,2}-[0-9]{1,2}-[0-9]{4}')),
+            SAFE.PARSE_DATE('%d/%m/%y', REGEXP_EXTRACT(${cleanStr}, r'^[0-9]{1,2}/[0-9]{1,2}/[0-9]{2}')),
+            SAFE.PARSE_DATE('%m/%d/%y', REGEXP_EXTRACT(${cleanStr}, r'^[0-9]{1,2}/[0-9]{1,2}/[0-9]{2}')),
+            SAFE.PARSE_DATE('%d.%m.%y', REGEXP_EXTRACT(${cleanStr}, r'^[0-9]{1,2}\\.[0-9]{1,2}\\.[0-9]{2}')),
+            SAFE.PARSE_DATE('%m.%d.%y', REGEXP_EXTRACT(${cleanStr}, r'^[0-9]{1,2}\\.[0-9]{1,2}\\.[0-9]{2}')),
+            SAFE.PARSE_DATE('%d-%m-%y', REGEXP_EXTRACT(${cleanStr}, r'^[0-9]{1,2}-[0-9]{1,2}-[0-9]{2}')),
+            SAFE.PARSE_DATE('%m-%d-%y', REGEXP_EXTRACT(${cleanStr}, r'^[0-9]{1,2}-[0-9]{1,2}-[0-9]{2}'))
           ) AS ${colName}
         `.trim();
       }

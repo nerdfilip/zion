@@ -2,7 +2,7 @@
 // CONFIGURATION: EXPORT PT QUERY PIPELINE
 // ============================================================================
 const EPT_PROJECT_ID = 'sit-ldl-int-oi-a-lvzt-run-818b';
-const EPT_DATASET_ID = 'lagerliste_imports';
+const EPT_DATASET_ID = 'imports';
 const EPT_TABLE_ID   = 'export_pt';
 const EPT_AUTO_CREATE_TARGET_TABLE = true; // Create once if missing, never recreate each run
 // Write strategy for existing target table:

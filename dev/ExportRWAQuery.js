@@ -2,7 +2,7 @@
 // CONFIGURATION: RWA QUERY PIPELINE
 // ============================================================================
 const RWA_PROJECT_ID = 'sit-ldl-int-oi-a-lvzt-run-818b';
-const RWA_DATASET_ID = 'lagerliste_imports';
+const RWA_DATASET_ID = 'imports';
 const RWA_TABLE_ID   = 'rwa_pq';
 const RWA_AUTO_CREATE_TARGET_TABLE = true;
 const RWA_WRITE_MODE = 'MERGE';
