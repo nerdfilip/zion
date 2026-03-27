@@ -234,14 +234,18 @@ function convertToGoogleSheet_(excelFile, folderId, options) {
   const metadata = { name: excelFile.getName(), mimeType: MimeType.GOOGLE_SHEETS, parents: [folderId] };
 
   // Path A: Copy+convert with retries (fastest, but can return transient "Internal Error")
+  console.log('[CONVERT-GS] Path A: Attempting Drive.Files.copy() ...');
   let lastErr;
   for (let attempt = 1; attempt <= 4; attempt++) {
     try {
+      console.log('[CONVERT-GS] copy() attempt ' + attempt + ' ...');
       const newFile = Drive.Files.copy(metadata, excelFile.getId(), { supportsAllDrives: true });
+      console.log('[CONVERT-GS] copy() succeeded. New file ID: ' + newFile.id);
       return newFile.id;
     } catch (e) {
       lastErr = e;
       const msg = String(e && e.message || e);
+      console.log('[CONVERT-GS] copy() attempt ' + attempt + ' failed: ' + msg);
       const transient = /Internal Error|backendError|rate limit|timeout/i.test(msg);
       if (!transient || attempt === 4) break;
       Utilities.sleep(1500 * attempt);
@@ -251,16 +255,21 @@ function convertToGoogleSheet_(excelFile, folderId, options) {
   // Path B: Resumable upload with server-side conversion (for large files that exceed copy limits).
   // Streams 25 MB chunks from the source file so memory stays low.
   if (settings.skipBlobFallback) {
+    console.log('[CONVERT-GS] Path B: skipBlobFallback=true → entering resumable upload path ...');
     try {
-      return convertLargeExcelViaResumableUpload_(excelFile.getId(), excelFile.getName(), folderId);
+      const resultId = convertLargeExcelViaResumableUpload_(excelFile.getId(), excelFile.getName(), folderId);
+      console.log('[CONVERT-GS] Resumable upload succeeded. New file ID: ' + resultId);
+      return resultId;
     } catch (resumableErr) {
       const primaryMsg  = String(lastErr && lastErr.message || lastErr || 'unknown');
       const resumableMsg = String(resumableErr && resumableErr.message || resumableErr || 'unknown');
+      console.log('[CONVERT-GS] Resumable upload failed: ' + resumableMsg);
       throw new Error(`Drive conversion failed. copy() error: ${primaryMsg} | resumable upload error: ${resumableMsg}`);
     }
   }
 
   // Path C: Fallback to insert+convert using media blob (smaller files only).
+  console.log('[CONVERT-GS] Path C: Attempting blob insert/create fallback ...');
   try {
     let inserted;
     try {
@@ -384,11 +393,14 @@ function downloadLargeFileBytes_(fileId) {
  * @returns {string} The ID of the newly created Google Sheet.
  */
 function convertLargeExcelViaResumableUpload_(fileId, fileName, folderId) {
+  console.log('[RESUMABLE] Starting resumable upload conversion for ' + fileName + ' (fileId=' + fileId + ')');
   const token = ScriptApp.getOAuthToken();
   const fileSize = Number(DriveApp.getFileById(fileId).getSize() || 0);
+  console.log('[RESUMABLE] File size: ' + fileSize + ' bytes (' + Math.round(fileSize / (1024 * 1024)) + ' MB)');
   if (!fileSize) throw new Error('Cannot determine file size for resumable upload.');
 
   // --- Step 1: Initiate a resumable upload session with conversion ---
+  console.log('[RESUMABLE] Step 1: Initiating resumable upload session ...');
   const metadataPayload = JSON.stringify({
     name: fileName,
     mimeType: 'application/vnd.google-apps.spreadsheet',
@@ -411,8 +423,11 @@ function convertLargeExcelViaResumableUpload_(fileId, fileName, folderId) {
   );
 
   const initCode = initResp.getResponseCode();
+  console.log('[RESUMABLE] Session init response: HTTP ' + initCode);
   if (initCode !== 200) {
-    throw new Error('Resumable session init HTTP ' + initCode + ': ' + initResp.getContentText());
+    const body = initResp.getContentText();
+    console.log('[RESUMABLE] Session init FAILED body: ' + body.substring(0, 500));
+    throw new Error('Resumable session init HTTP ' + initCode + ': ' + body);
   }
 
   // Retrieve the upload URI (case-insensitive header lookup)
@@ -422,6 +437,7 @@ function convertLargeExcelViaResumableUpload_(fileId, fileName, folderId) {
     if (hKey.toLowerCase() === 'location') { uploadUrl = respHeaders[hKey]; break; }
   }
   if (!uploadUrl) throw new Error('No upload URI returned from resumable session.');
+  console.log('[RESUMABLE] Upload URI obtained (length=' + uploadUrl.length + ')');
 
   // --- Step 2: Stream 25 MB chunks from the source file to the upload URI ---
   // 25 MB is a multiple of 256 KiB (required by the resumable protocol) and
@@ -429,42 +445,56 @@ function convertLargeExcelViaResumableUpload_(fileId, fileName, folderId) {
   const CHUNK = 25 * 1024 * 1024;
   const downloadUrl = 'https://www.googleapis.com/drive/v3/files/' + fileId + '?alt=media';
   let offset = 0;
+  let chunkNum = 0;
+  const totalChunks = Math.ceil(fileSize / CHUNK);
+  console.log('[RESUMABLE] Step 2: Streaming ' + totalChunks + ' chunks of ' + Math.round(CHUNK / (1024 * 1024)) + ' MB each ...');
 
   while (offset < fileSize) {
+    chunkNum++;
     const end = Math.min(offset + CHUNK - 1, fileSize - 1);
+    const chunkSizeMB = Math.round((end - offset + 1) / (1024 * 1024));
 
     // Download this byte range from the source file
+    console.log('[RESUMABLE] Chunk ' + chunkNum + '/' + totalChunks + ': downloading bytes ' + offset + '-' + end + ' (' + chunkSizeMB + ' MB) ...');
     const dlResp = UrlFetchApp.fetch(downloadUrl, {
       headers: { 'Authorization': 'Bearer ' + token, 'Range': 'bytes=' + offset + '-' + end },
       muteHttpExceptions: true
     });
     const dlCode = dlResp.getResponseCode();
     if (dlCode !== 206 && dlCode !== 200) {
+      console.log('[RESUMABLE] Chunk ' + chunkNum + ' download FAILED: HTTP ' + dlCode);
       throw new Error('Resumable source download failed at offset ' + offset + ': HTTP ' + dlCode);
     }
     const chunkBytes = dlResp.getContent(); // Byte[]
+    console.log('[RESUMABLE] Chunk ' + chunkNum + ' downloaded: ' + chunkBytes.length + ' bytes. Uploading ...');
 
     // Upload this range to the resumable session
+    const contentRange = 'bytes ' + offset + '-' + (offset + chunkBytes.length - 1) + '/' + fileSize;
     const ulResp = UrlFetchApp.fetch(uploadUrl, {
       method: 'put',
       contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
       headers: {
-        'Content-Range': 'bytes ' + offset + '-' + (offset + chunkBytes.length - 1) + '/' + fileSize
+        'Content-Range': contentRange
       },
       payload: chunkBytes,
       muteHttpExceptions: true
     });
 
     const ulCode = ulResp.getResponseCode();
+    console.log('[RESUMABLE] Chunk ' + chunkNum + ' upload response: HTTP ' + ulCode);
     if (ulCode === 200 || ulCode === 201) {
       // Final chunk accepted – file created and converted
       var result = JSON.parse(ulResp.getContentText());
+      console.log('[RESUMABLE] Upload COMPLETE. New file ID: ' + result.id);
       return result.id;
     } else if (ulCode === 308) {
       // Chunk accepted, continue with next range
       offset += chunkBytes.length;
+      console.log('[RESUMABLE] Chunk ' + chunkNum + ' accepted. Next offset: ' + offset);
     } else {
-      throw new Error('Resumable upload failed at offset ' + offset + ': HTTP ' + ulCode + ' ' + ulResp.getContentText());
+      const ulBody = ulResp.getContentText();
+      console.log('[RESUMABLE] Chunk ' + chunkNum + ' upload FAILED: HTTP ' + ulCode + ' body=' + ulBody.substring(0, 500));
+      throw new Error('Resumable upload failed at offset ' + offset + ': HTTP ' + ulCode + ' ' + ulBody);
     }
   }
 
