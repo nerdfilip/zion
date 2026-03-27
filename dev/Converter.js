@@ -452,11 +452,14 @@ function convertLargeExcelViaResumableUpload_(fileId, fileName, folderId) {
   while (offset < fileSize) {
     chunkNum++;
     const end = Math.min(offset + CHUNK - 1, fileSize - 1);
-    const chunkSizeMB = Math.round((end - offset + 1) / (1024 * 1024));
+    const expectedLen = end - offset + 1;
+    const chunkSizeMB = Math.round(expectedLen / (1024 * 1024));
 
-    // Download this byte range from the source file
+    // Download this byte range from the source file.
+    // Use getBlob() instead of getContent() so the payload stays in Java heap
+    // (outside V8's ~256 MB limit) – avoids OOM on large multi-chunk uploads.
     console.log('[RESUMABLE] Chunk ' + chunkNum + '/' + totalChunks + ': downloading bytes ' + offset + '-' + end + ' (' + chunkSizeMB + ' MB) ...');
-    const dlResp = UrlFetchApp.fetch(downloadUrl, {
+    var dlResp = UrlFetchApp.fetch(downloadUrl, {
       headers: { 'Authorization': 'Bearer ' + token, 'Range': 'bytes=' + offset + '-' + end },
       muteHttpExceptions: true
     });
@@ -465,20 +468,22 @@ function convertLargeExcelViaResumableUpload_(fileId, fileName, folderId) {
       console.log('[RESUMABLE] Chunk ' + chunkNum + ' download FAILED: HTTP ' + dlCode);
       throw new Error('Resumable source download failed at offset ' + offset + ': HTTP ' + dlCode);
     }
-    const chunkBytes = dlResp.getContent(); // Byte[]
-    console.log('[RESUMABLE] Chunk ' + chunkNum + ' downloaded: ' + chunkBytes.length + ' bytes. Uploading ...');
+    var dlBlob = dlResp.getBlob();
+    console.log('[RESUMABLE] Chunk ' + chunkNum + ' downloaded (' + chunkSizeMB + ' MB). Uploading ...');
+    dlResp = null; // release response reference for GC
 
     // Upload this range to the resumable session
-    const contentRange = 'bytes ' + offset + '-' + (offset + chunkBytes.length - 1) + '/' + fileSize;
-    const ulResp = UrlFetchApp.fetch(uploadUrl, {
+    const contentRange = 'bytes ' + offset + '-' + (offset + expectedLen - 1) + '/' + fileSize;
+    var ulResp = UrlFetchApp.fetch(uploadUrl, {
       method: 'put',
       contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
       headers: {
         'Content-Range': contentRange
       },
-      payload: chunkBytes,
+      payload: dlBlob,
       muteHttpExceptions: true
     });
+    dlBlob = null; // release blob reference for GC
 
     const ulCode = ulResp.getResponseCode();
     console.log('[RESUMABLE] Chunk ' + chunkNum + ' upload response: HTTP ' + ulCode);
@@ -489,13 +494,15 @@ function convertLargeExcelViaResumableUpload_(fileId, fileName, folderId) {
       return result.id;
     } else if (ulCode === 308) {
       // Chunk accepted, continue with next range
-      offset += chunkBytes.length;
+      offset += expectedLen;
       console.log('[RESUMABLE] Chunk ' + chunkNum + ' accepted. Next offset: ' + offset);
     } else {
       const ulBody = ulResp.getContentText();
       console.log('[RESUMABLE] Chunk ' + chunkNum + ' upload FAILED: HTTP ' + ulCode + ' body=' + ulBody.substring(0, 500));
       throw new Error('Resumable upload failed at offset ' + offset + ': HTTP ' + ulCode + ' ' + ulBody);
     }
+    ulResp = null; // release upload response for GC
+    Utilities.sleep(50); // yield to runtime for GC
   }
 
   throw new Error('Resumable upload finished all chunks without receiving a completion response.');
