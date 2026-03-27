@@ -248,15 +248,20 @@ function convertToGoogleSheet_(excelFile, folderId, options) {
     }
   }
 
-  // Path B: Fallback to insert+convert using media blob
-  // This bypasses occasional copy() backend failures for some files.
+  // Path B: Resumable upload with server-side conversion (for large files that exceed copy limits).
+  // Streams 25 MB chunks from the source file so memory stays low.
   if (settings.skipBlobFallback) {
-    const primaryMsg = String(lastErr && lastErr.message || lastErr || 'unknown');
-    throw new Error(`Drive conversion failed before blob fallback: ${primaryMsg}`);
+    try {
+      return convertLargeExcelViaResumableUpload_(excelFile.getId(), excelFile.getName(), folderId);
+    } catch (resumableErr) {
+      const primaryMsg  = String(lastErr && lastErr.message || lastErr || 'unknown');
+      const resumableMsg = String(resumableErr && resumableErr.message || resumableErr || 'unknown');
+      throw new Error(`Drive conversion failed. copy() error: ${primaryMsg} | resumable upload error: ${resumableMsg}`);
+    }
   }
 
+  // Path C: Fallback to insert+convert using media blob (smaller files only).
   try {
-    // Try v3 (create) first, fall back to v2 (insert) if it doesn't exist.
     let inserted;
     try {
       inserted = Drive.Files.create(metadata, excelFile.getBlob(), { supportsAllDrives: true });
@@ -362,6 +367,108 @@ function downloadLargeFileBytes_(fileId) {
   }
 
   return result;
+}
+
+/**
+ * Converts a large Excel file to a Google Sheet using the Drive v3 resumable
+ * upload API with server-side conversion.  The source file is streamed in
+ * 25 MB chunks (download-from-Drive → upload-to-new-Sheet) so the Apps Script
+ * runtime never holds the full file in memory (~50 MB peak).
+ *
+ * The resumable upload conversion limit for xlsx is ~200 MB – well above the
+ * ~100 MB ceiling of Drive.Files.copy().
+ *
+ * @param {string} fileId   Drive file ID of the source xlsx.
+ * @param {string} fileName Display name for the new Google Sheet.
+ * @param {string} folderId Drive folder to create the Sheet in.
+ * @returns {string} The ID of the newly created Google Sheet.
+ */
+function convertLargeExcelViaResumableUpload_(fileId, fileName, folderId) {
+  const token = ScriptApp.getOAuthToken();
+  const fileSize = Number(DriveApp.getFileById(fileId).getSize() || 0);
+  if (!fileSize) throw new Error('Cannot determine file size for resumable upload.');
+
+  // --- Step 1: Initiate a resumable upload session with conversion ---
+  const metadataPayload = JSON.stringify({
+    name: fileName,
+    mimeType: 'application/vnd.google-apps.spreadsheet',
+    parents: [folderId]
+  });
+
+  const initResp = UrlFetchApp.fetch(
+    'https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&supportsAllDrives=true',
+    {
+      method: 'post',
+      contentType: 'application/json; charset=UTF-8',
+      headers: {
+        'Authorization': 'Bearer ' + token,
+        'X-Upload-Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        'X-Upload-Content-Length': String(fileSize)
+      },
+      payload: metadataPayload,
+      muteHttpExceptions: true
+    }
+  );
+
+  const initCode = initResp.getResponseCode();
+  if (initCode !== 200) {
+    throw new Error('Resumable session init HTTP ' + initCode + ': ' + initResp.getContentText());
+  }
+
+  // Retrieve the upload URI (case-insensitive header lookup)
+  const respHeaders = initResp.getHeaders();
+  let uploadUrl = '';
+  for (var hKey in respHeaders) {
+    if (hKey.toLowerCase() === 'location') { uploadUrl = respHeaders[hKey]; break; }
+  }
+  if (!uploadUrl) throw new Error('No upload URI returned from resumable session.');
+
+  // --- Step 2: Stream 25 MB chunks from the source file to the upload URI ---
+  // 25 MB is a multiple of 256 KiB (required by the resumable protocol) and
+  // stays safely within UrlFetchApp's ~50 MB request/response ceiling.
+  const CHUNK = 25 * 1024 * 1024;
+  const downloadUrl = 'https://www.googleapis.com/drive/v3/files/' + fileId + '?alt=media';
+  let offset = 0;
+
+  while (offset < fileSize) {
+    const end = Math.min(offset + CHUNK - 1, fileSize - 1);
+
+    // Download this byte range from the source file
+    const dlResp = UrlFetchApp.fetch(downloadUrl, {
+      headers: { 'Authorization': 'Bearer ' + token, 'Range': 'bytes=' + offset + '-' + end },
+      muteHttpExceptions: true
+    });
+    const dlCode = dlResp.getResponseCode();
+    if (dlCode !== 206 && dlCode !== 200) {
+      throw new Error('Resumable source download failed at offset ' + offset + ': HTTP ' + dlCode);
+    }
+    const chunkBytes = dlResp.getContent(); // Byte[]
+
+    // Upload this range to the resumable session
+    const ulResp = UrlFetchApp.fetch(uploadUrl, {
+      method: 'put',
+      contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      headers: {
+        'Content-Range': 'bytes ' + offset + '-' + (offset + chunkBytes.length - 1) + '/' + fileSize
+      },
+      payload: chunkBytes,
+      muteHttpExceptions: true
+    });
+
+    const ulCode = ulResp.getResponseCode();
+    if (ulCode === 200 || ulCode === 201) {
+      // Final chunk accepted – file created and converted
+      var result = JSON.parse(ulResp.getContentText());
+      return result.id;
+    } else if (ulCode === 308) {
+      // Chunk accepted, continue with next range
+      offset += chunkBytes.length;
+    } else {
+      throw new Error('Resumable upload failed at offset ' + offset + ': HTTP ' + ulCode + ' ' + ulResp.getContentText());
+    }
+  }
+
+  throw new Error('Resumable upload finished all chunks without receiving a completion response.');
 }
 
 /**
@@ -500,7 +607,7 @@ function convertViaDrivePath_(file, fileObj, csvName, readyFolder, folderId, sys
   const settings = options || {};
   systemLog(`[SERVER] Instructing Google Drive to convert Excel file...`);
   let tempSheetId = convertToGoogleSheet_(file, folderId, {
-    skipBlobFallback: !!settings.keepAsGoogleSheet
+    skipBlobFallback: !!settings.skipBlobFallback || !!settings.keepAsGoogleSheet
   });
   systemLog(`[SERVER] Drive API success. Temp Sheet ID: ${tempSheetId}`);
 
