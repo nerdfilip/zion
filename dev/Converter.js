@@ -439,10 +439,11 @@ function convertLargeExcelViaResumableUpload_(fileId, fileName, folderId) {
   if (!uploadUrl) throw new Error('No upload URI returned from resumable session.');
   console.log('[RESUMABLE] Upload URI obtained (length=' + uploadUrl.length + ')');
 
-  // --- Step 2: Stream 25 MB chunks from the source file to the upload URI ---
-  // 25 MB is a multiple of 256 KiB (required by the resumable protocol) and
-  // stays safely within UrlFetchApp's ~50 MB request/response ceiling.
-  const CHUNK = 25 * 1024 * 1024;
+  // --- Step 2: Stream 5 MB chunks from the source file to the upload URI ---
+  // 5 MB (5,242,880 bytes) is a multiple of 256 KiB (required by the resumable
+  // protocol) and keeps the per-iteration memory spike small enough to avoid
+  // V8 OOM crashes even after many iterations with lagging GC.
+  const CHUNK = 5 * 1024 * 1024;
   const downloadUrl = 'https://www.googleapis.com/drive/v3/files/' + fileId + '?alt=media';
   let offset = 0;
   let chunkNum = 0;
@@ -502,7 +503,7 @@ function convertLargeExcelViaResumableUpload_(fileId, fileName, folderId) {
       throw new Error('Resumable upload failed at offset ' + offset + ': HTTP ' + ulCode + ' ' + ulBody);
     }
     ulResp = null; // release upload response for GC
-    Utilities.sleep(50); // yield to runtime for GC
+    Utilities.sleep(1500); // 1.5s breathing room for V8 garbage collection
   }
 
   throw new Error('Resumable upload finished all chunks without receiving a completion response.');
