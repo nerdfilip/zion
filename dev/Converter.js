@@ -10,6 +10,7 @@ const ERROR_CELL_LOG_LIMIT = 200;
 const ERROR_CELL_LOG_FALLBACK_DISPLAY = '(blank-display)';
 const CHUNK_MAX_ROWS = 200000;
 const SHEETJS_MAX_FILE_BYTES = 100 * 1024 * 1024; // SheetJS + Uint8Array must fit in V8's ~256 MB heap
+const DRIVE_IMPORT_MAX_BYTES = 100 * 1024 * 1024; // Google's xlsx → Sheets conversion limit
 
 const SPREADSHEET_ERROR_MARKERS = [
   '#ERROR!',
@@ -191,6 +192,18 @@ function processSingleFile(fileObj) {
         }
 
         // Drive conversion + chunked CSV export
+        if (fileSize > SHEETJS_MAX_FILE_BYTES && fileSize > DRIVE_IMPORT_MAX_BYTES) {
+          // Both conversion paths are blocked:
+          //  - SheetJS: file + parsed workbook would exceed V8's ~256 MB heap
+          //  - Drive: Google's xlsx→Sheets import rejects files > ~100 MB (HTTP 413)
+          systemLog(`[SERVER] File exceeds BOTH SheetJS memory limit (${Math.round(SHEETJS_MAX_FILE_BYTES / (1024 * 1024))}MB) AND Google Drive import limit (${Math.round(DRIVE_IMPORT_MAX_BYTES / (1024 * 1024))}MB).`);
+          systemLog(`[SERVER] This file (${Math.round(fileSize / (1024 * 1024))}MB) cannot be converted within Apps Script.`);
+          return {
+            success: false,
+            log: `[ERROR] ${fileObj.name}: File is too large (${Math.round(fileSize / (1024 * 1024))}MB) for any available conversion path. Google Drive rejects xlsx imports >100MB and Apps Script cannot parse it in memory. Please convert to CSV externally (e.g. Excel → Save As CSV) before uploading.`,
+            trace: serverTrace
+          };
+        }
         if (fileSize > SHEETJS_MAX_FILE_BYTES) {
           systemLog(`[SERVER] File exceeds SheetJS memory-safe limit (${Math.round(SHEETJS_MAX_FILE_BYTES / (1024 * 1024))}MB). Using server-side Drive conversion.`);
         }
