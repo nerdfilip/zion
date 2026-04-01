@@ -99,7 +99,12 @@ class ConverterWorker(QThread):
 
         for col in df.columns:
             col_name = str(col)
-            non_null = df[col].dropna()
+            series = df[col]
+            if isinstance(series, pd.DataFrame):
+                self.update_status.emit(f"Warning: Duplicate header detected for '{col_name}', skipping numeric inference")
+                continue
+
+            non_null = series.dropna()
             if non_null.empty:
                 continue
 
@@ -132,10 +137,10 @@ class ConverterWorker(QThread):
         self.bignumeric_headers = inferred_bignumeric
 
     def _apply_decimal_columns(self, df):
-        for col in sorted(self.integer_headers):
+        for col in sorted(self.integer_headers, key=str):
             df[col] = pd.to_numeric(df[col], errors='coerce').astype('Int64')
 
-        for col in sorted(self.bignumeric_headers):
+        for col in sorted(self.bignumeric_headers, key=str):
             df[col] = df[col].apply(self._to_decimal)
 
     def _apply_german_dictionary_headers(self, columns):
@@ -149,8 +154,12 @@ class ConverterWorker(QThread):
 
     @staticmethod
     def _normalize_nulls_for_parquet(df):
-        # Ensure NaN/NaT become Python None across all dtypes for parquet export.
-        return df.astype(object).where(pd.notna(df), None)
+        # Keep dtypes stable; null normalization is handled per column at write time.
+        return df.copy()
+
+    @staticmethod
+    def _to_nullable_list(series):
+        return [None if pd.isna(v) else v for v in series.tolist()]
 
     @staticmethod
     def _normalize_nulls_for_avro(df):
@@ -173,11 +182,18 @@ class ConverterWorker(QThread):
     def _write_parquet(self, out_path, df):
         arrays = []
         for col in df.columns:
-            values = df[col].tolist()
+            series = df[col]
+            values = self._to_nullable_list(series)
+
             if col in self.bignumeric_headers:
-                arrays.append(pa.array(values, type=pa.decimal256(76, 38)))
-            elif col in self.integer_headers:
+                decimal_values = [self._to_decimal(v) for v in values]
+                arrays.append(pa.array(decimal_values, type=pa.decimal256(76, 38)))
+            elif col in self.integer_headers or pd.api.types.is_integer_dtype(series):
                 arrays.append(pa.array(values, type=pa.int64()))
+            elif pd.api.types.is_float_dtype(series):
+                # Export float-like numeric columns as exact decimals for BigQuery compatibility.
+                decimal_values = [self._to_decimal(v) for v in values]
+                arrays.append(pa.array(decimal_values, type=pa.decimal256(76, 38)))
             else:
                 arrays.append(pa.array(values))
 
@@ -198,12 +214,18 @@ class ConverterWorker(QThread):
                 else:
                     self.update_status.emit(f"Skipped {os.path.basename(file)} (Unsupported format)")
                     continue
+
+                # Replace every NaN / NaT / NA with None so empty cells are always null.
+                df = df.where(df.notna(), None)
                 
                 # Normalize headers to lowercase and valid identifier format.
                 df.columns = self._sanitize_headers(df.columns)
 
                 if self.use_german_dict:
                     df.columns = self._apply_german_dictionary_headers(df.columns)
+
+                # Re-sanitize after transliteration in case collisions are introduced.
+                df.columns = self._sanitize_headers(df.columns)
 
                 # Keep column names as strings to avoid mixed-type sort/comparison errors.
                 df.columns = [str(col) for col in df.columns]
@@ -228,10 +250,10 @@ class ConverterWorker(QThread):
                         f"Auto-detected BIGNUMERIC headers: {', '.join(sorted(self.bignumeric_headers, key=str)) or 'none'}"
                     )
 
-                    # Apply decimal typing only for parquet to keep avro conversion stable.
-                    df = self._normalize_nulls_for_parquet(df)
-                    self._apply_decimal_columns(df)
-                    self._write_parquet(out_path, df)
+                    # Enforce integer/decimal parquet output for BigQuery compatibility.
+                    typed_df = self._normalize_nulls_for_parquet(df)
+                    self._apply_decimal_columns(typed_df)
+                    self._write_parquet(out_path, typed_df)
                 
                 self.update_status.emit(f"Success: Saved {os.path.basename(out_path)}")
             except Exception as e:
