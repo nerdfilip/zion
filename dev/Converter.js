@@ -58,6 +58,7 @@ function onOpen() {
   addIfAvailable('Convert Files (CSV)', 'openProgressUI');
   addIfAvailable('Import Ready Files to BigQuery', 'openBQProgressUI');
   addIfAvailable('Execute transformations (Lagerliste)', 'openTransformUI');
+  addIfAvailable('Execute Stored Procedures', 'openExecuteQueriesUI');
 
   menu.addToUi();
 }

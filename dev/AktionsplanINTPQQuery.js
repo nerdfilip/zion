@@ -172,21 +172,21 @@ function _buildAktionsplanSQL_(cols) {
         SAFE_CAST(\`${b.sap_artikelnummer}\` AS INT64)   AS laenderspezifische_sap_nummern,
         SAFE.PARSE_DATE('%Y-%m-%d', CAST(\`${b.vk_datum}\` AS STRING)) AS vk_datum,
         CAST(\`${b.werbeimpuls_col}\` AS STRING)         AS werbeimpuls,
-        CAST(\`${b.aktionsmenge_col}\` AS STRING)        AS aktionsmenge,
+        SAFE_CAST(\`${b.aktionsmenge_col}\` AS INT64)    AS aktionsmenge,
         CAST(\`${b.thema_nat_col}\` AS STRING)           AS thema_nat,
         -- Columns not provided by BÄF
-        CAST(NULL AS STRING) AS charge,
+        CAST(NULL AS INT64) AS charge,
         CAST(NULL AS STRING) AS laendervariante,
         CAST(NULL AS STRING) AS shop,
         CAST(NULL AS STRING) AS liefertermin,
         CAST(NULL AS STRING) AS wdh,
-        CAST(NULL AS STRING) AS abverkaufshorizont,
-        CAST(NULL AS STRING) AS bestellmenge,
+        CAST(NULL AS INT64) AS abverkaufshorizont,
+        CAST(NULL AS INT64) AS bestellmenge,
         CAST(NULL AS STRING) AS produktmanager_nat,
         CAST(NULL AS STRING) AS saisonkennzeichen,
         CAST(NULL AS STRING) AS thema_nr_raw,
         CAST(NULL AS STRING) AS thema_raw,
-        CAST(NULL AS STRING) AS palettenfaktor,
+        CAST(NULL AS INT64) AS palettenfaktor,
         CAST(NULL AS STRING) AS verkaufsfaehig_fuer_de,
         CAST(NULL AS STRING) AS verkaufsfaehig_fuer_be,
         CAST(NULL AS STRING) AS verkaufsfaehig_fuer_nl,
@@ -220,20 +220,20 @@ function _buildAktionsplanSQL_(cols) {
         SAFE_CAST(\`${a.laenderspezifische_sap_nummern}\` AS INT64)   AS laenderspezifische_sap_nummern,
         SAFE.PARSE_DATE('%Y-%m-%d', CAST(\`${a.vk_datum}\` AS STRING)) AS vk_datum,
         CAST(\`${a.werbeimpuls}\` AS STRING)                           AS werbeimpuls,
-        CAST(\`${a.aktionsmenge}\` AS STRING)                          AS aktionsmenge,
+        SAFE_CAST(\`${a.aktionsmenge}\` AS INT64)                      AS aktionsmenge,
         CAST(\`${a.thema_nat}\` AS STRING)                             AS thema_nat,
-        CAST(\`${a.charge}\` AS STRING)                                AS charge,
+        SAFE_CAST(\`${a.charge}\` AS INT64)                            AS charge,
         CAST(\`${a.laendervariante}\` AS STRING)                       AS laendervariante,
         CAST(\`${a.shop}\` AS STRING)                                  AS shop,
         CAST(\`${a.liefertermin}\` AS STRING)                          AS liefertermin,
         CAST(\`${a.wdh}\` AS STRING)                                   AS wdh,
-        CAST(\`${a.abverkaufshorizont}\` AS STRING)                    AS abverkaufshorizont,
-        CAST(\`${a.bestellmenge}\` AS STRING)                          AS bestellmenge,
+        SAFE_CAST(\`${a.abverkaufshorizont}\` AS INT64)                AS abverkaufshorizont,
+        SAFE_CAST(\`${a.bestellmenge}\` AS INT64)                      AS bestellmenge,
         CAST(\`${a.produktmanager_nat}\` AS STRING)                    AS produktmanager_nat,
         CAST(\`${a.saisonkennzeichen}\` AS STRING)                     AS saisonkennzeichen,
         CAST(\`${a.thema_nr}\` AS STRING)                              AS thema_nr_raw,
         CAST(\`${a.thema}\` AS STRING)                                 AS thema_raw,
-        CAST(\`${a.palettenfaktor}\` AS STRING)                        AS palettenfaktor,
+        SAFE_CAST(\`${a.palettenfaktor}\` AS INT64)                    AS palettenfaktor,
         CAST(\`${a.verkaufsfaehig_fuer_de}\` AS STRING)                AS verkaufsfaehig_fuer_de,
         CAST(\`${a.verkaufsfaehig_fuer_be}\` AS STRING)                AS verkaufsfaehig_fuer_be,
         CAST(\`${a.verkaufsfaehig_fuer_nl}\` AS STRING)                AS verkaufsfaehig_fuer_nl,
@@ -282,7 +282,7 @@ function _buildAktionsplanSQL_(cols) {
           SAFE_CAST(TRIM(SPLIT(liefertermin, '/')[SAFE_OFFSET(0)]) AS INT64),
           0
         )                                                   AS liefertermin_kw,
-        TRIM(SPLIT(liefertermin, '/')[SAFE_OFFSET(1)])      AS liefertermin_jahr
+        SAFE_CAST(TRIM(SPLIT(liefertermin, '/')[SAFE_OFFSET(1)]) AS INT64) AS liefertermin_jahr
       FROM with_cbx
     ),
 
@@ -299,11 +299,10 @@ function _buildAktionsplanSQL_(cols) {
         CASE
           WHEN liefertermin_kw = 0
             OR liefertermin_jahr IS NULL
-            OR TRIM(COALESCE(liefertermin_jahr, '')) = ''
           THEN NULL
           ELSE DATE_TRUNC(
             DATE_ADD(
-              DATE(SAFE_CAST(TRIM(liefertermin_jahr) AS INT64), 1, 1),
+              DATE(liefertermin_jahr, 1, 1),
               INTERVAL (liefertermin_kw - 1) * 7 DAY
             ),
             WEEK(MONDAY)
@@ -327,8 +326,8 @@ function _buildAktionsplanSQL_(cols) {
         CASE
           WHEN (UPPER(TRIM(werbeimpuls)) = 'BM' OR UPPER(TRIM(werbeimpuls)) = 'DBM')
                AND vk_datum >= DATE_TRUNC(CURRENT_DATE(), MONTH)
-          THEN '1'
-          ELSE '0'
+          THEN 1
+          ELSE 0
         END AS relevantes_vk_datum_bm
       FROM with_dates
     ),
@@ -340,8 +339,8 @@ function _buildAktionsplanSQL_(cols) {
           WHEN UPPER(TRIM(werbeimpuls)) = 'BM' OR UPPER(TRIM(werbeimpuls)) = 'DBM'
           THEN relevantes_vk_datum_bm
           WHEN vk_datum >= DATE_TRUNC(CURRENT_DATE(), WEEK(MONDAY))
-          THEN '1'
-          ELSE '0'
+          THEN 1
+          ELSE 0
         END AS relevantes_vk_datum_ne_bm
       FROM with_flags
     ),
@@ -379,7 +378,7 @@ function _buildAktionsplanSQL_(cols) {
       laendervariante,
       shop,
       liefertermin,
-      vk_datum,
+      CAST(vk_datum AS STRING) AS vk_datum,
       werbeimpuls,
       wdh,
       abverkaufshorizont,
@@ -388,7 +387,7 @@ function _buildAktionsplanSQL_(cols) {
       aktionsmenge,
       produktmanager_nat,
       CASE WHEN saisonkennzeichen = 'Sonstiges' THEN '' ELSE saisonkennzeichen END AS saisonkennzeichen,
-      CAST(thema_nr AS STRING) AS thema_nr,
+      SAFE_CAST(thema_nr AS FLOAT64) AS thema_nr,
       thema,
       palettenfaktor,
       verkaufsfaehig_fuer_de,
@@ -404,9 +403,9 @@ function _buildAktionsplanSQL_(cols) {
       verkaufsfaehig_fuer_dk,
       verkaufsfaehig_fuer_it,
       COALESCE(liefertermin_kw, 0)                   AS liefertermin_kw,
-      liefertermin_jahr,
-      wochenstart_heute,
-      lieferdatum,
+      CAST(liefertermin_jahr AS STRING) AS liefertermin_jahr,
+      UNIX_DATE(wochenstart_heute) AS wochenstart_heute,
+      CAST(lieferdatum AS STRING) AS lieferdatum,
       relevant_zukunftslieferung,
       relevantes_vk_datum_bm,
       relevantes_vk_datum_ne_bm,
@@ -635,44 +634,44 @@ function _ensureAktionsplanTargetTable_() {
     },
     schema: {
       fields: [
-        { name: 'laenderspezifische_sap_nummern', type: 'INT64'  },
-        { name: 'charge',                         type: 'STRING' },
-        { name: 'laendervariante',                type: 'STRING' },
-        { name: 'shop',                           type: 'STRING' },
-        { name: 'liefertermin',                   type: 'STRING' },
-        { name: 'vk_datum',                       type: 'DATE'   },
-        { name: 'werbeimpuls',                    type: 'STRING' },
-        { name: 'wdh',                            type: 'STRING' },
-        { name: 'abverkaufshorizont',             type: 'STRING' },
-        { name: 'thema_nat',                      type: 'STRING' },
-        { name: 'bestellmenge',                   type: 'STRING' },
-        { name: 'aktionsmenge',                   type: 'STRING' },
-        { name: 'produktmanager_nat',             type: 'STRING' },
-        { name: 'saisonkennzeichen',              type: 'STRING' },
-        { name: 'thema_nr',                       type: 'STRING' },
-        { name: 'thema',                          type: 'STRING' },
-        { name: 'palettenfaktor',                 type: 'STRING' },
-        { name: 'verkaufsfaehig_fuer_de',         type: 'STRING' },
-        { name: 'verkaufsfaehig_fuer_be',         type: 'STRING' },
-        { name: 'verkaufsfaehig_fuer_nl',         type: 'STRING' },
-        { name: 'verkaufsfaehig_fuer_cz',         type: 'STRING' },
-        { name: 'verkaufsfaehig_fuer_es',         type: 'STRING' },
-        { name: 'verkaufsfaehig_fuer_fr',         type: 'STRING' },
-        { name: 'verkaufsfaehig_fuer_pl',         type: 'STRING' },
-        { name: 'verkaufsfaehig_fuer_sk',         type: 'STRING' },
-        { name: 'verkaufsfaehig_fuer_at',         type: 'STRING' },
-        { name: 'verkaufsfaehig_fuer_hu',         type: 'STRING' },
-        { name: 'verkaufsfaehig_fuer_dk',         type: 'STRING' },
-        { name: 'verkaufsfaehig_fuer_it',         type: 'STRING' },
-        { name: 'liefertermin_kw',                type: 'INT64'  },
-        { name: 'liefertermin_jahr',              type: 'STRING' },
-        { name: 'wochenstart_heute',              type: 'DATE'   },
-        { name: 'lieferdatum',                    type: 'DATE'   },
-        { name: 'relevant_zukunftslieferung',     type: 'INT64'  },
-        { name: 'relevantes_vk_datum_bm',         type: 'STRING' },
-        { name: 'relevantes_vk_datum_ne_bm',      type: 'STRING' },
-        { name: 'shop_kopie',                     type: 'STRING' },
-        { name: 'ocm',                            type: 'STRING' }
+        { name: 'laenderspezifische_sap_nummern', type: 'INT64'   },
+        { name: 'charge',                         type: 'INT64'   },
+        { name: 'laendervariante',                type: 'STRING'  },
+        { name: 'shop',                           type: 'STRING'  },
+        { name: 'liefertermin',                   type: 'STRING'  },
+        { name: 'vk_datum',                       type: 'STRING'  },
+        { name: 'werbeimpuls',                    type: 'STRING'  },
+        { name: 'wdh',                            type: 'STRING'  },
+        { name: 'abverkaufshorizont',             type: 'INT64'   },
+        { name: 'thema_nat',                      type: 'STRING'  },
+        { name: 'bestellmenge',                   type: 'INT64'   },
+        { name: 'aktionsmenge',                   type: 'INT64'   },
+        { name: 'produktmanager_nat',             type: 'STRING'  },
+        { name: 'saisonkennzeichen',              type: 'STRING'  },
+        { name: 'thema_nr',                       type: 'FLOAT64' },
+        { name: 'thema',                          type: 'STRING'  },
+        { name: 'palettenfaktor',                 type: 'INT64'   },
+        { name: 'verkaufsfaehig_fuer_de',         type: 'STRING'  },
+        { name: 'verkaufsfaehig_fuer_be',         type: 'STRING'  },
+        { name: 'verkaufsfaehig_fuer_nl',         type: 'STRING'  },
+        { name: 'verkaufsfaehig_fuer_cz',         type: 'STRING'  },
+        { name: 'verkaufsfaehig_fuer_es',         type: 'STRING'  },
+        { name: 'verkaufsfaehig_fuer_fr',         type: 'STRING'  },
+        { name: 'verkaufsfaehig_fuer_pl',         type: 'STRING'  },
+        { name: 'verkaufsfaehig_fuer_sk',         type: 'STRING'  },
+        { name: 'verkaufsfaehig_fuer_at',         type: 'STRING'  },
+        { name: 'verkaufsfaehig_fuer_hu',         type: 'STRING'  },
+        { name: 'verkaufsfaehig_fuer_dk',         type: 'STRING'  },
+        { name: 'verkaufsfaehig_fuer_it',         type: 'STRING'  },
+        { name: 'liefertermin_kw',                type: 'INT64'   },
+        { name: 'liefertermin_jahr',              type: 'STRING'   },
+        { name: 'wochenstart_heute',              type: 'INT64'   },
+        { name: 'lieferdatum',                    type: 'STRING'   },
+        { name: 'relevant_zukunftslieferung',     type: 'INT64'   },
+        { name: 'relevantes_vk_datum_bm',         type: 'INT64'   },
+        { name: 'relevantes_vk_datum_ne_bm',      type: 'INT64'   },
+        { name: 'shop_kopie',                     type: 'STRING'  },
+        { name: 'ocm',                            type: 'STRING'  }
       ]
     }
   };
