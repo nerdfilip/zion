@@ -9,17 +9,17 @@ const EQ_PROCEDURES = [
   {
     name: 'sp_build_export_pt',
     label: 'Export PT',
-    call: `CALL \`${EQ_PROJECT_ID}.${EQ_DATASET_ID}.sp_build_export_pt\`()`
+    call: `CALL \`${EQ_PROJECT_ID}.${EQ_DATASET_ID}.sp_export_pt\`()`
   },
   {
     name: 'sp_build_rwa_pq',
     label: 'RWA PQ',
-    call: `CALL \`${EQ_PROJECT_ID}.${EQ_DATASET_ID}.sp_build_rwa_pq\`()`
+    call: `CALL \`${EQ_PROJECT_ID}.${EQ_DATASET_ID}.sp_rwa_pq\`()`
   },
   {
     name: 'sp_build_aktionsplan_int_pq',
     label: 'Aktionsplan INT PQ',
-    call: `CALL \`${EQ_PROJECT_ID}.${EQ_DATASET_ID}.sp_build_aktionsplan_int_pq\`()`
+    call: `CALL \`${EQ_PROJECT_ID}.${EQ_DATASET_ID}.sp_aktionsplan_int_pq\`()`
   }
 ];
 

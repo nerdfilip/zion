@@ -1,146 +1,265 @@
 // ============================================================================
 // CONFIGURATION: BIGQUERY & FOLDERS
 // ============================================================================
-const GCP_PROJECT_ID = 'sit-ldl-int-oi-a-lvzt-run-818b'; 
-const DATASET_ID = 'imports'; 
-const ARCHIVE_FOLDER_ID = '1IOrUiTS_xXb69EBUcb8rqPSbUhQKjugO'; 
-// const READY_FOLDER_ID = '16mMxz1DvsIEgKUk4mAXnamwxIQ50ddP5';
+const GCP_PROJECT_ID    = 'sit-ldl-int-oi-a-lvzt-run-818b'; 
+const DATASET_ID        = 'imports_v4'; 
+const ARCHIVE_FOLDER_ID = '1IOrUiTS_xXb69EBUcb8rqPSbUhQKjugO';
 
+// List of tracked files to set row logic
+// IMPORTANT: Specific keywords MUST be placed before generic ones 
+// (e.g., "aktionsplan int_ltu" must be above "aktionsplan")
 const FILE_RULES = [
-  { keyword: "db abfrage",                     headerRow: 1, dataRow: 2, delimiter: ";" },
-  { keyword: "übersicht überschneiderartikel", headerRow: 2, dataRow: 3 },
+  { keyword: "übersicht überschneiderartikel", headerRow: 2, dataRow: 3 }, 
+  { keyword: "osnl",                           headerRow: 2, dataRow: 3 }, 
+  { keyword: "osde",                           headerRow: 2, dataRow: 3 },
+  { keyword: "osbe",                           headerRow: 2, dataRow: 3 },
+  { keyword: "oscz",                           headerRow: 2, dataRow: 3 },
+  { keyword: "oses",                           headerRow: 2, dataRow: 3 },
+  { keyword: "osfr",                           headerRow: 2, dataRow: 3 },
+  { keyword: "ospl",                           headerRow: 2, dataRow: 3 },
+  { keyword: "ossk",                           headerRow: 2, dataRow: 3 },
+  { keyword: "aktionsplan int_ltu",            headerRow: 1, dataRow: 2 }, 
+  { keyword: "aktionsplan",                    headerRow: 1, dataRow: 2 }, 
+  { keyword: "allocation",                     headerRow: 1, dataRow: 2 },
+  { keyword: "ausnahmeliste",                  headerRow: 1, dataRow: 2 }, 
+  { keyword: "baugleich import",               headerRow: 1, dataRow: 2 }, 
   { keyword: "bäf_de",                         headerRow: 7, dataRow: 9 }, 
-  { keyword: "osnl",                           headerRow: 1, dataRow: 2 },
-  { keyword: "rwa",                            headerRow: 3, dataRow: 4 }
+  { keyword: "dearchiv",                       headerRow: 1, dataRow: 2 },
+  { keyword: "export pt",                      headerRow: 1, dataRow: 2 }, 
+  { keyword: "gesamt export cbx",              headerRow: 1, dataRow: 2 },
+  { keyword: "lagerliste",                     headerRow: 1, dataRow: 2 },
+  { keyword: "product ratings report",         headerRow: 1, dataRow: 2 }, 
+  { keyword: "wt stationär",                   headerRow: 1, dataRow: 2 }
 ];
+
+const OS_SHARED_SCHEMA = { kopfartikel: "STRING", ergebnis: "FLOAT64" };
+const OSDE_SCHEMA = { kopfartikel: "STRING", summe_von_st_rwa: "FLOAT64", summe_von_rwa_anteil_land: "FLOAT64", summe_von_rwa_anteil_land_vormonat: "FLOAT64", summe_von_delta: "FLOAT64" };
 
 const FILE_SPECIAL_OPTIONS = [
+  { keyword: "osde", typeOverrides: OSDE_SCHEMA }, 
+  { keyword: "osnl", typeOverrides: OS_SHARED_SCHEMA },
+  { keyword: "osbe", typeOverrides: OS_SHARED_SCHEMA },
+  { keyword: "oscz", typeOverrides: OS_SHARED_SCHEMA },
+  { keyword: "oses", typeOverrides: OS_SHARED_SCHEMA },
+  { keyword: "osfr", typeOverrides: OS_SHARED_SCHEMA },
+  { keyword: "ospl", typeOverrides: OS_SHARED_SCHEMA },
+  { keyword: "ossk", typeOverrides: OS_SHARED_SCHEMA },
   {
-    keyword: "artikelkette",
-    keepColumnIndexes: [0, 1],
-    typeOverrides: { artikelkette: "STRING" }
+    keyword: "aktionsplan int_ltu",
+    typeOverrides: {
+      ian: "INT64", laenderspezifische_sap_nummern: "FLOAT64", bezeichnung: "STRING", charge: "INT64",
+      technischer_status: "STRING", marke: "STRING", markentyp: "STRING", beduerfniswelten: "STRING",
+      beduerfniskategorie: "STRING", laendervariante: "STRING", saisonauftakt: "FLOAT64", lt_split: "STRING",
+      erster_lt: "STRING", erster_wt: "STRING", shop: "STRING", wt_id: "INT64", liefertermin: "STRING",
+      werbetermin: "STRING", vk_datum: "STRING", kampagneninformation: "FLOAT64", kampagnen_startdatum: "STRING",
+      kampagnen_enddatum: "STRING", werbeimpuls: "STRING", wdh: "FLOAT64", abverkaufshorizont: "INT64",
+      tv_artikel: "FLOAT64", thema_nat: "STRING", abverkaufshorizont_nat: "FLOAT64", bestellmenge: "INT64",
+      aktionsmenge: "INT64", nachlaufmenge: "INT64", ek_netto: "FLOAT64", vk_brutto: "FLOAT64",
+      ek_netto_nat: "FLOAT64", vk_brutto_nat: "FLOAT64", mwst: "INT64", umsatz_ek_netto: "FLOAT64",
+      umsatz_vk_brutto: "FLOAT64", umsatz_vk_netto: "FLOAT64", db_1: "FLOAT64", vk_kalk: "STRING",
+      einkaeufer: "STRING", lieferant: "STRING", produktmanager_nat: "STRING", herkunft: "STRING",
+      ian_vorgaenger: "FLOAT64", referenzartikel: "FLOAT64", artikeltyp: "STRING", sortimentstyp: "STRING",
+      nfsourcingstrategie: "FLOAT64", mehrfachpack: "FLOAT64", saisonkennzeichen: "STRING", warengruppe: "FLOAT64",
+      thema_nr: "FLOAT64", thema: "STRING", ruecknahmevereinbarung: "STRING", kollifaktor: "INT64",
+      palettenfaktor: "INT64", abwicklungsart: "STRING", gefahrgut: "STRING", strecke: "STRING",
+      versandfaehige_verpackung: "STRING", packstuecktyp: "STRING", versandart: "STRING",
+      geodatenklassifizierung: "STRING", laenge: "FLOAT64", breite: "FLOAT64", hoehe: "FLOAT64",
+      gewicht: "FLOAT64", verkaufsfaehig_fuer_de: "STRING", verkaufsfaehig_fuer_be: "STRING",
+      verkaufsfaehig_fuer_nl: "STRING", verkaufsfaehig_fuer_cz: "STRING", verkaufsfaehig_fuer_es: "STRING",
+      verkaufsfaehig_fuer_fr: "STRING", verkaufsfaehig_fuer_pl: "STRING", verkaufsfaehig_fuer_sk: "STRING",
+      verkaufsfaehig_fuer_at: "STRING", verkaufsfaehig_fuer_hu: "STRING", verkaufsfaehig_fuer_dk: "STRING",
+      verkaufsfaehig_fuer_it: "STRING", verkaufsfaehig_fuer_pt: "FLOAT64", verkaufsfaehig_fuer_se: "FLOAT64",
+      verkaufsfaehig_fuer_fi: "FLOAT64", bezeichnung_nat: "STRING", kommentar_nat: "STRING", kommentar: "STRING"
+    }
   },
   {
-    keyword: "ganzjahresartikel",
-    keepColumnIndexes: [0, 1, 2]
+    keyword: "aktionsplan",
+    typeOverrides: {
+      ian: "STRING", laenderspezifische_sap_nummern: "INT64", bezeichnung: "STRING", charge: "INT64",
+      technischer_status: "STRING", marke: "STRING", markentyp: "STRING", beduerfniswelten: "STRING",
+      beduerfniskategorie: "STRING", laendervariante: "STRING", saisonauftakt: "STRING", lt_split: "STRING",
+      erster_lt: "STRING", erster_wt: "STRING", shop: "STRING", wt_id: "INT64", liefertermin: "STRING",
+      werbetermin: "STRING", vk_datum: "STRING", kampagneninformation: "STRING", kampagnen_startdatum: "STRING",
+      kampagnen_enddatum: "STRING", werbeimpuls: "STRING", wdh: "STRING", abverkaufshorizont: "INT64",
+      tv_artikel: "STRING", thema_nat: "STRING", abverkaufshorizont_nat: "INT64", bestellmenge: "INT64",
+      aktionsmenge: "INT64", nachlaufmenge: "INT64", ek_netto: "FLOAT64", vk_brutto: "FLOAT64",
+      ek_netto_nat: "FLOAT64", vk_brutto_nat: "FLOAT64", mwst: "INT64", umsatz_ek_netto: "FLOAT64",
+      umsatz_vk_brutto: "FLOAT64", umsatz_vk_netto: "FLOAT64", db_1: "FLOAT64", vk_kalk: "STRING",
+      einkaeufer: "STRING", lieferant: "STRING", produktmanager_nat: "STRING", herkunft: "STRING",
+      ian_vorgaenger: "INT64", referenzartikel: "INT64", artikeltyp: "STRING", sortimentstyp: "STRING",
+      nfsourcingstrategie: "STRING", mehrfachpack: "STRING", saisonkennzeichen: "STRING", warengruppe: "FLOAT64",
+      thema_nr: "FLOAT64", thema: "STRING", ruecknahmevereinbarung: "STRING", kollifaktor: "INT64",
+      palettenfaktor: "INT64", abwicklungsart: "STRING", gefahrgut: "STRING", strecke: "STRING",
+      versandfaehige_verpackung: "STRING", packstuecktyp: "STRING", versandart: "STRING",
+      geodatenklassifizierung: "STRING", laenge: "FLOAT64", breite: "FLOAT64", hoehe: "FLOAT64",
+      gewicht: "FLOAT64", verkaufsfaehig_fuer_de: "STRING", verkaufsfaehig_fuer_be: "STRING",
+      verkaufsfaehig_fuer_nl: "STRING", verkaufsfaehig_fuer_cz: "STRING", verkaufsfaehig_fuer_es: "STRING",
+      verkaufsfaehig_fuer_fr: "STRING", verkaufsfaehig_fuer_pl: "STRING", verkaufsfaehig_fuer_sk: "STRING",
+      verkaufsfaehig_fuer_at: "STRING", verkaufsfaehig_fuer_hu: "STRING", verkaufsfaehig_fuer_dk: "STRING",
+      verkaufsfaehig_fuer_it: "STRING", verkaufsfaehig_fuer_pt: "STRING", verkaufsfaehig_fuer_se: "STRING",
+      verkaufsfaehig_fuer_fi: "STRING", bezeichnung_nat: "STRING", kommentar_nat: "STRING", kommentar: "STRING"
+    }
   },
   {
-    keyword: "reporting",
-    headerRow: 3,
-    dataRow: 5,
-    headerRowByColumn: { 0: 4 },
-    typeOverrides: { standortcode: "STRING", 
-                     kommentar: "STRING", 
-                     kommentar_1: "STRING", 
-                     kommentar_2: "STRING" 
-                     }
-  }
-];
-
-const TYPE_OVERRIDES = {
-  "ian": "INT64",
-  "ean": "INT64",
-  "artikelnummer": "INT64",
-  "article_number": "INT64",
-  "stock": "INT64",
-  "bestand": "INT64",
-  "laenderspezifische_sap_nummern": "INT64",
-  "abverkaufshorizont_nat": "INT64",
-  "kopfartikel": "INT64",
-  "summe_von_st_rwa": "BIGNUMERIC",
-  "rwa_pro_st_ck": "BIGNUMERIC",
-  "rwa_pro_stueck": "BIGNUMERIC",
-  "aktions_vk": "NUMERIC",
-  "sortiment_vk_lidl": "NUMERIC",
-  "name": "STRING",
-  "kw": "STRING"
-};
-
-const HEADER_TYPE_RULES = [
-  {
-    type: 'BIGNUMERIC',
-    patterns: [
-      /^summe_von_st_rwa$/,
-      /^rwa_pro_st_ck$/,
-      /^rwa_pro_stueck$/,
-      /(^|_)rwa(_|$)/
-    ]
+    keyword: "allocation",
+    typeOverrides: {
+      artikelnummer: "INT64", name: "STRING", virtuelles_warenhaus: "STRING",
+      startdatum: "STRING", enddatum: "STRING", planwert: "INT64", reserve: "INT64",
+      aufloeungsdatum: "FLOAT64", abverkauf: "INT64", abgedeckter_restwert_berechnet: "INT64",
+      abgedeckter_restwert_effektiv: "INT64", sap_atp: "INT64", verkaufbarer_bestand: "INT64",
+      sperrbestand: "INT64", globalbestand_lager: "INT64", globalbestand_zwischenlaeger: "INT64",
+      globalbestand_echt: "INT64", echt_bestand_rod: "INT64", echt_bestand_rod2: "INT64",
+      echt_bestand_afs: "INT64", echt_bestand_sap_atp: "INT64", globalbestand_venlo: "INT64",
+      venlo_bestand_rod: "INT64", venlo_bestand_rod2: "INT64", venlo_bestand_afs: "INT64",
+      venlo_bestand_sap_atp: "INT64", verfuegbarkeit: "STRING", wt_id: "STRING", status: "STRING"
+    }
   },
   {
-    type: 'INT64',
-    patterns: [
-      /^ian$/,
-      /^ean$/,
-      /^artikelnummer(_\d+)?$/,
-      /^article_number(_\d+)?$/,
-      /^laenderspezifische_sap_nummern$/,
-      /^abverkaufshorizont_nat$/,
-      /^kopfartikel$/,
-      /(^|_)(sap_nummer|sap_nummern)(_|$)/,
-      /(^|_)(stock|bestand)(_|$)/
-    ]
+    keyword: "ausnahmeliste",
+    renameColumns: { "col_": "kommentar" },
+    typeOverrides: {
+      kopfartikel: "INT64", kopfartikelbezeichnung: "STRING", artikeltyp: "STRING",
+      urspruengliches_verwertungs_datum: "STRING", betroffene_laender: "STRING",
+      genehmigt_ipm_kuerzel: "STRING", datum_genehmigung: "STRING", genehmigte_massnahme: "STRING",
+      neuer_verwertungstermin_datum: "STRING", neuer_verwertungstermin_kw: "STRING",
+      anfrage_durch_land_am: "STRING", anfragendes_land: "STRING", kommentar: "STRING"
+    }
   },
   {
-    type: 'DATE',
-    patterns: [
-      /(^|_)(datum|date)(_|$)/,
-      /(^|_)(gueltig_ab|gueltig_bis)(_|$)/
-    ]
+    keyword: "bäf_de",
+    typeOverrides: {
+      ocm: "STRING", ian: "INT64", sap_artikelnummer: "INT64", bezeichnung: "STRING",
+      vk_datum: "DATE", end_datum: "DATE", werbe_impuls: "STRING", kampagnen_information: "STRING",
+      startdatum: "DATE", enddatum: "DATE", tv: "STRING", aktions_menge: "INT64",
+      vk_brutto: "FLOAT64", allokation_gewuenscht: "STRING", menge_on_top: "STRING",
+      landesanmerkung_wdh: "STRING", thema_nat: "STRING", ek: "STRING", marge: "STRING",
+      ian_im_amc: "STRING", sap_im_amc: "STRING", bereits_im_amc: "STRING", daten_vollstaendig: "STRING",
+      meldung_fs_zu_spaet: "STRING", meldung_dd_zu_spaet: "STRING", wi_fs_oder_dd: "STRING",
+      allokiert: "STRING", anzahl_varianten: "STRING"
+    }
   },
   {
-    type: 'NUMERIC',
-    patterns: [
-      /(^|_)(preis|wert|kosten|vk|eur|volumen|umsatz|betrag)(_|$)/,
-      /^aktions_vk$/,
-      /^sortiment_vk_lidl$/
-    ]
+    keyword: "dearchiv",
+    typeOverrides: {
+      ocm: "STRING", organisationsebene: "STRING", sap_kopf: "INT64", 
+      ian_abw_stationaer: "FLOAT64", ian: "STRING"
+    }
   },
   {
-    type: 'BOOL',
-    patterns: [
-      /(^|_)(aktiv|active|flag|is_.*|bool)(_|$)/
-    ]
-  }
-];
-
-function inferDataTypeFromHeader_(headerName) {
-  const key = String(headerName || '').toLowerCase();
-  if (!key) return null;
-  if (TYPE_OVERRIDES[key]) return TYPE_OVERRIDES[key];
-
-  for (let i = 0; i < HEADER_TYPE_RULES.length; i++) {
-    const rule = HEADER_TYPE_RULES[i];
-    const patterns = rule.patterns || [];
-    for (let j = 0; j < patterns.length; j++) {
-      if (patterns[j].test(key)) return rule.type;
+    keyword: "baugleich import",
+    renameColumns: { "col_": "second_column" },
+    typeOverrides: {
+       artikel: "STRING",
+       second_column: "STRING" 
+    }
+  },
+  {
+    keyword: "export pt",
+    typeOverrides: {
+      zone: "STRING", article_number: "INT64", ian: "STRING", name: "STRING", ean: "STRING",
+      msrp: "FLOAT64", previous_selling_price: "FLOAT64", current_selling_price: "FLOAT64",
+      previous_shipping_surcharge: "FLOAT64", current_shipping_surcharge: "FLOAT64",
+      itp: "FLOAT64", freightage: "FLOAT64", logistics_costs: "FLOAT64", global_status: "STRING",
+      listing_status: "STRING", online_status: "STRING", supplier_number: "STRING", supplier: "STRING",
+      logistics: "STRING", stock: "INT64", number_competitor_prices: "INT64", displayed_in_store: "STRING",
+      item_family_code: "STRING", item_family_name: "STRING", brick_code: "INT64", created_by: "STRING"
+    }
+  },
+  {
+    keyword: "gesamt export cbx",
+    typeOverrides: {
+      ian: "INT64", ausm_nr: "STRING", artikelbezeichnung: "STRING", vorgaenger: "INT64",
+      vorgaenger_2: "INT64", vorgaenger_3: "INT64", vorgaenger_4: "STRING", warengruppe: "STRING",
+      ki: "INT64", referenzvorgaenger: "INT64", referenzartikel_eu_usa: "INT64", thema_am: "STRING",
+      lt_am_land: "STRING", wt_am_land: "STRING", ekl: "STRING", gf: "STRING", marke: "STRING",
+      zvp: "FLOAT64", gesamtmenge: "INT64", bestellmenge_de: "FLOAT64", bestellmenge_osde: "FLOAT64",
+      bestellbar_fuer: "STRING", bewertungen_uebernehmen_os_code: "STRING", bewertungen_uebernehmen_os: "STRING"
+    }
+  },
+  {
+    keyword: "lagerliste",
+    typeOverrides: {
+      stichtag: "STRING", wshop_cd: "STRING", ocm: "STRING", beduerfniswelten: "STRING",
+      organisationsebene: "STRING", artikelfamilie: "FLOAT64", sap_kopf: "INT64", ian: "FLOAT64",
+      bezeichnung: "STRING", bundle_set: "STRING", eigenmarke_marke: "STRING", sortimentsklasse: "STRING",
+      dauerdispo: "STRING", altersstruktur_stand_ende_vorvormonat: "STRING",
+      altersstruktur_stand_ende_vormonat: "STRING", aenderung_altersstruktur: "STRING", marke: "STRING",
+      bestand_webshop_ende_vormonat: "FLOAT64", ek_volumen_webshop_ende_vormonat: "FLOAT64",
+      bestand_int_ende_vormonat: "FLOAT64", ek_volumen_int_ende_vormonat: "FLOAT64",
+      bestand_land_aktuell: "FLOAT64", ek_volumen_land: "FLOAT64", durchschn_wochenabverkauf_8_wochen: "FLOAT64",
+      reichweite_wochen_rechn_restbestand: "FLOAT64", reichweite_monate_rechn_restbestand: "FLOAT64",
+      venlo_bestand: "FLOAT64", variantenverfuegbarkeit_shop_land: "STRING",
+      variantenverfuegbarkeit_alle_laender: "STRING", bestand_alle_laender: "INT64",
+      durchschn_letzter_einkaufspreis_netto: "FLOAT64", retourenquote_aufg_3_gj: "FLOAT64",
+      online_offline: "STRING", grossteil: "STRING", lt: "STRING", verwertungsdatum: "STRING",
+      artikeltyp: "STRING", global_offline_verwertung_status33: "STRING", global_status_code: "INT64",
+      prod_online_status_cd: "FLOAT64", prod_listing_status_cd: "INT64", physischer_bestand_blo: "INT64",
+      physischer_bestand_hue: "INT64", physischer_bestand_lud: "INT64", physischer_bestand_pil: "INT64",
+      physischer_bestand_rot: "INT64", physischer_bestand_venlo: "INT64", physischer_bestand_roosendal: "INT64",
+      physischer_bestand_sosnowiecz: "INT64", physischer_bestand_ech: "INT64", physischer_bestand_ses: "INT64",
+      physischer_bestand_pin: "INT64"
+    }
+  },
+  {
+    keyword: "product ratings report",
+    typeOverrides: {
+      head_number: "INT64",
+      product_name: "STRING",
+      ratings: "FLOAT64", 
+      stars: "STRING"    
+    }
+  },
+  {
+    keyword: "übersicht überschneiderartikel",
+    typeOverrides: {
+      ian: "INT64", artikelbez: "STRING", vertriebskanaele: "STRING", wer_definiert_mindest_vk: "STRING",
+      ek: "FLOAT64", zvp: "FLOAT64", fruehester_lt: "STRING", listungsart_kl: "STRING", listungsart_lidl: "STRING",
+      werbewoche_kl: "STRING", aktion_vk_kl: "FLOAT64", sortiment_vk_kl: "FLOAT64",
+      wettbewerber_inklusive_preis: "STRING", gtin_kl: "STRING", werbewoche_lidl: "STRING",
+      aktion_vk_lidl: "FLOAT64", sortiment_vk_lidl: "FLOAT64", wettbewerber_lidl: "STRING",
+      wettbewerber_preis: "FLOAT64", versandkosten_lidl_os: "FLOAT64", vorgaenger_wt: "STRING",
+      v1_ian: "STRING", v2_ian: "STRING", v3_ian: "STRING", aktions_vk: "FLOAT64",
+      aktions_vk_inkl_versandkosten: "FLOAT64", sortiment_vk: "FLOAT64",
+      sortiment_vk_inkl_versandkosten: "FLOAT64", kommentar_ocm_pricing_zur_abstimmung_mit_kl: "STRING",
+      abgestimmt_kw: "STRING", sap_nummer: "STRING"
+    }
+  },
+  {
+    keyword: "wt stationär",
+    typeOverrides: {
+      art_nr: "INT64", art_bezeichnung_nat: "STRING", art_bezeichnung_de: "STRING", chargen_nr: "STRING",
+      bemerkung_4: "STRING", marke: "STRING", m_em: "STRING", lt: "STRING", wt: "STRING", gueltig_ab: "STRING",
+      regionen: "STRING", ek_krz_int: "STRING", ek_name_nat: "STRING", werbemittel_nat: "STRING",
+      werbemittel_int: "STRING", beduerfniswelt: "STRING", aktionsunterbereich: "STRING", uwg: "STRING",
+      af: "STRING", thema_nr: "STRING", thema: "STRING", vorgaenger_art_nr: "STRING", lieferant: "STRING",
+      mwst: "FLOAT64", menge: "FLOAT64", ki: "STRING", stk_fil: "FLOAT64", ek_nto: "FLOAT64", vk_neu: "FLOAT64",
+      ek_volumen: "FLOAT64", umsatz_op_plan_neu: "FLOAT64", rohertrag_op_plan_neu: "FLOAT64",
+      aktions_kalk_op_plan_neu: "FLOAT64", bemerkung_1: "STRING", kontrakt: "STRING", uvp: "FLOAT64",
+      kl_artikel: "STRING", zvp: "FLOAT64", abwicklungsart_de: "STRING", anlief_ges_ab: "STRING", pf: "STRING",
+      theor_pf: "STRING", kampagne: "STRING", bemerkung_land: "STRING", wz: "STRING", display: "STRING",
+      status: "STRING", art_nr_wawi: "STRING", freigabe_wawi: "STRING", bemerkung_2: "STRING", ve_wunsch: "STRING",
+      bemerkung_an_ekl: "STRING", aufgeteilte_lieferung: "STRING", bemerkung_5: "STRING",
+      filialplatzierung_int: "STRING", artikeltyp: "STRING"
     }
   }
+];
 
-  return null;
-}
-
+// ============================================================================
+// HELPERS (DATA TYPE DETECTION & FORMATTING)
+// ============================================================================
 function normalizeNumberish_(value, fileDelimiter) {
   let v = String(value || '').trim();
   if (!v) return '';
   v = v.replace(/[€$£\s]/g, '').replace(/[^0-9,.-]/g, '');
   if (!v) return '';
-
-  if (fileDelimiter === ';') {
-    return v.replace(/\./g, '').replace(/,/g, '.');
-  }
-  return v.replace(/,/g, '');
+  return fileDelimiter === ';' ? v.replace(/\./g, '').replace(/,/g, '.') : v.replace(/,/g, '');
 }
 
 function isDateLikeValue_(rawValue) {
   const raw = String(rawValue || '').trim();
   if (!raw) return false;
-
-  // ISO variants with optional time (e.g. 2026-03-27 or 2026-03-27T11:22:33).
   if (/^\d{4}[-\/.]\d{1,2}[-\/.]\d{1,2}(?:[ T].*)?$/.test(raw)) return true;
-
-  // Day-first / month-first variants using slash, dot or dash separators.
   if (/^\d{1,2}[-\/.]\d{1,2}[-\/.]\d{2,4}(?:[ T].*)?$/.test(raw)) return true;
-
   return false;
 }
 
@@ -151,80 +270,49 @@ function inferDataTypeFromSamples_(samples, fileDelimiter) {
 
   if (!values.length) return 'STRING';
 
-  let dateCount = 0;
-  let boolCount = 0;
-  let intCount = 0;
-  let decimalCount = 0;
-  let intOverflowCount = 0;
-
+  let [dateCount, boolCount, intCount, decimalCount, intOverflowCount] = [0, 0, 0, 0, 0];
   const INT64_MIN_BI = BigInt('-9223372036854775808');
   const INT64_MAX_BI = BigInt('9223372036854775807');
 
-  for (let i = 0; i < values.length; i++) {
-    const raw = values[i];
-    if (/^(true|false|yes|no|ja|nein|0|1)$/i.test(raw)) {
-      boolCount++;
-      continue;
-    }
-
-    if (isDateLikeValue_(raw)) {
-      dateCount++;
-      continue;
-    }
+  for (let raw of values) {
+    if (/^(true|false|yes|no|ja|nein|0|1)$/i.test(raw)) { boolCount++; continue; }
+    if (isDateLikeValue_(raw)) { dateCount++; continue; }
 
     const normalized = normalizeNumberish_(raw, fileDelimiter);
-    if (!normalized) continue;
-
-    const n = Number(normalized);
-    if (Number.isNaN(n)) continue;
+    if (!normalized || Number.isNaN(Number(normalized))) continue;
 
     if (/^-?\d+$/.test(normalized)) {
       intCount++;
-
-      // Keep integer-like IDs that exceed INT64 as STRING to prevent load crashes.
       const bi = BigInt(normalized);
-      if (bi < INT64_MIN_BI || bi > INT64_MAX_BI) {
-        intOverflowCount++;
-      }
+      if (bi < INT64_MIN_BI || bi > INT64_MAX_BI) intOverflowCount++;
     } else {
       decimalCount++;
     }
   }
 
   const total = values.length;
-  const numericCount = intCount + decimalCount;
   if (dateCount / total >= 0.85) return 'DATE';
   if (boolCount / total >= 0.9) return 'BOOL';
-  if (numericCount / total >= 0.85) {
+  if ((intCount + decimalCount) / total >= 0.85) {
     if (intCount > 0 && decimalCount === 0 && intOverflowCount > 0) return 'STRING';
     return decimalCount > 0 ? 'NUMERIC' : 'INT64';
   }
   return 'STRING';
 }
 
-function resolveColumnType_(headerName, sampleValues, fileDelimiter) {
-  const byHeader = inferDataTypeFromHeader_(headerName);
-  if (byHeader) return byHeader;
-  return inferDataTypeFromSamples_(sampleValues, fileDelimiter);
-}
-
 function resolveColumnTypeWithOverrides_(headerName, sampleValues, fileDelimiter, typeOverrides) {
   const key = String(headerName || '').toLowerCase();
   if (typeOverrides && typeOverrides[key]) return typeOverrides[key];
-  return resolveColumnType_(headerName, sampleValues, fileDelimiter);
+  return inferDataTypeFromSamples_(sampleValues, fileDelimiter);
 }
 
 function getSpecialFileOptions_(lowerName) {
-  for (let i = 0; i < FILE_SPECIAL_OPTIONS.length; i++) {
-    if (lowerName.includes(FILE_SPECIAL_OPTIONS[i].keyword)) return FILE_SPECIAL_OPTIONS[i];
-  }
-  return null;
+  return FILE_SPECIAL_OPTIONS.find(opt => lowerName.includes(opt.keyword)) || null;
 }
 
 function columnIndexToA1_(columnIndex) {
   let index = Number(columnIndex);
   if (!Number.isFinite(index) || index < 0) return null;
-
   let result = '';
   while (index >= 0) {
     result = String.fromCharCode((index % 26) + 65) + result;
@@ -235,12 +323,7 @@ function columnIndexToA1_(columnIndex) {
 
 function buildSheetRangeFromColumnIndexes_(indexes) {
   if (!indexes || !indexes.length) return null;
-
-  let normalized = indexes
-    .map(n => Number(n))
-    .filter(n => Number.isInteger(n) && n >= 0)
-    .sort((a, b) => a - b);
-
+  let normalized = indexes.map(Number).filter(n => Number.isInteger(n) && n >= 0).sort((a, b) => a - b);
   if (!normalized.length) return null;
 
   for (let i = 1; i < normalized.length; i++) {
@@ -249,106 +332,133 @@ function buildSheetRangeFromColumnIndexes_(indexes) {
 
   let start = columnIndexToA1_(normalized[0]);
   let end = columnIndexToA1_(normalized[normalized.length - 1]);
-  if (!start || !end) return null;
-  return `${start}:${end}`;
+  return start && end ? `${start}:${end}` : null;
 }
 
 function buildRawHeaders_(parsedRows, lineRows, fileDelimiter, headerRow, headerRowByColumn, keepColumnIndexes) {
-  let baseHeaders = parsedRows && parsedRows.length
-    ? (parsedRows[headerRow - 1] || [])
+  let baseHeaders = (parsedRows && parsedRows.length) 
+    ? (parsedRows[headerRow - 1] || []) 
     : String(lineRows[headerRow - 1] || '').split(fileDelimiter);
 
-  let headers = baseHeaders.slice();
+  let headers = [...baseHeaders];
 
   if (headerRowByColumn) {
     Object.keys(headerRowByColumn).forEach(k => {
-      let colIndex = Number(k);
-      let rowNumber = Number(headerRowByColumn[k]);
-      if (!Number.isInteger(colIndex) || !Number.isInteger(rowNumber) || rowNumber <= 0) return;
-
-      let overrideRow = parsedRows && parsedRows.length
-        ? (parsedRows[rowNumber - 1] || [])
-        : String(lineRows[rowNumber - 1] || '').split(fileDelimiter);
-
-      headers[colIndex] = overrideRow[colIndex] || '';
+      let [colIndex, rowNumber] = [Number(k), Number(headerRowByColumn[k])];
+      if (Number.isInteger(colIndex) && Number.isInteger(rowNumber) && rowNumber > 0) {
+        let overrideRow = (parsedRows && parsedRows.length) 
+          ? (parsedRows[rowNumber - 1] || []) 
+          : String(lineRows[rowNumber - 1] || '').split(fileDelimiter);
+        headers[colIndex] = overrideRow[colIndex] || '';
+      }
     });
   }
 
   if (keepColumnIndexes && keepColumnIndexes.length) {
-    headers = keepColumnIndexes.map(idx => (headers[idx] != null ? headers[idx] : ''));
+    headers = keepColumnIndexes.map(idx => headers[idx] != null ? headers[idx] : '');
   }
-
   return headers;
 }
 
-// --- UPDATED: Now fetches both CSV and Google Sheets, groups chunked files ---
-function getReadyFiles() {
-  const folder = DriveApp.getFolderById(READY_FOLDER_ID);
-  const files = folder.getFiles();
-  let rawList = [];
+// ============================================================================
+// MASSIVE FILE AUTO-CHUNKER & INDEX INJECTOR
+// By-passes the 50MB Apps Script RAM limit by reading files in 15MB chunks
+// ============================================================================
+function autoChunkAndIndexMassiveCsv_(fileId, fileName, fileDelimiter, headerRow, dataRow) {
+  const token = ScriptApp.getOAuthToken();
+  const fileUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`;
   
-  while (files.hasNext()) {
-    let f = files.next();
-    let mime = f.getMimeType();
+  // 1. Get the total file size from Drive API
+  const metaUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?fields=size`;
+  const metaRes = UrlFetchApp.fetch(metaUrl, { headers: { 'Authorization': 'Bearer ' + token } });
+  const fileSize = parseInt(JSON.parse(metaRes.getContentText()).size, 10);
+  
+  const CHUNK_SIZE = 15 * 1024 * 1024; // Read 15 MB per step
+  let startByte = 0;
+  let leftoverText = ""; // Holds the remainder of a line that was cut off
+  let globalRowIndex = 1;
+  let chunkNumber = 1;
+  
+  let tempFilesToDelete = [];
+  let tempFileUris = [];
+  
+  console.log(`[AUTO-CHUNK] File of ${(fileSize / 1024 / 1024).toFixed(2)} MB detected. Starting byte-stream slicing and indexing...`);
+
+  while (startByte < fileSize) {
+    let endByte = Math.min(startByte + CHUNK_SIZE - 1, fileSize - 1);
     
-    if (mime === MimeType.CSV || mime === MimeType.GOOGLE_SHEETS || mime === 'text/csv') {
-      rawList.push({ id: f.getId(), name: f.getName(), mimeType: mime });
-    }
-  }
-  return groupChunkedFiles_(rawList);
-}
-
-/**
- * Groups __chunk_N files by their base name so they are processed as one
- * logical import. Standalone files pass through unchanged.
- */
-function groupChunkedFiles_(fileList) {
-  var CHUNK_PATTERN = /__chunk_(\d+)\.csv$/i;
-  var groups = {};
-  var standalone = [];
-
-  for (var i = 0; i < fileList.length; i++) {
-    var f = fileList[i];
-    var match = f.name.match(CHUNK_PATTERN);
-
-    if (match) {
-      var baseName = f.name.replace(CHUNK_PATTERN, '.csv');
-      if (!groups[baseName]) groups[baseName] = [];
-      groups[baseName].push({ file: f, index: parseInt(match[1], 10) });
-    } else {
-      standalone.push(f);
-    }
-  }
-
-  var result = standalone.slice();
-
-  Object.keys(groups).forEach(function (baseName) {
-    var sorted = groups[baseName].sort(function (a, b) { return a.index - b.index; });
-    var parts = sorted.map(function (s) { return s.file; });
-    result.push({
-      id: parts[0].id,
-      name: baseName,
-      mimeType: parts[0].mimeType,
-      parts: parts
+    // 2. Download only a 15MB slice of the file
+    let res = UrlFetchApp.fetch(fileUrl, {
+      headers: { 'Authorization': 'Bearer ' + token, 'Range': `bytes=${startByte}-${endByte}` },
+      muteHttpExceptions: true
     });
-  });
-
-  return result;
+    
+    let chunkText = leftoverText + res.getContentText();
+    
+    // 3. Ensure we do not cut a row in half (split at the last newline)
+    if (endByte < fileSize - 1) {
+      let lastNewlineIdx = chunkText.lastIndexOf('\n');
+      if (lastNewlineIdx !== -1) {
+        leftoverText = chunkText.substring(lastNewlineIdx + 1); // Keep the rest for the next chunk
+        chunkText = chunkText.substring(0, lastNewlineIdx); // Keep only complete rows
+      }
+    } else {
+      leftoverText = "";
+    }
+    
+    // 4. Parse the CSV (guaranteed to be safe for RAM)
+    let csvData;
+    try {
+      csvData = Utilities.parseCsv(chunkText, fileDelimiter);
+    } catch(e) {
+      console.log(`[CSV PARSE ERROR] Formatting errors in chunk ${chunkNumber}. Attempting simple split fallback.`);
+      csvData = chunkText.split('\n').map(row => row.split(fileDelimiter));
+    }
+    
+    // 5. Inject the continuous Row Index
+    for (let i = 0; i < csvData.length; i++) {
+      if (chunkNumber === 1 && i === headerRow - 1) {
+        csvData[i].unshift('index'); // Header name is exactly "index"
+      } else if (chunkNumber === 1 && i < dataRow - 1) {
+        csvData[i].unshift(''); // Blank space for ignored rows
+      } else {
+        csvData[i].unshift(globalRowIndex++); // Add sequential number and increment
+      }
+    }
+    
+    // 6. Rebuild the CSV chunk safely
+    const newCsvText = csvData.map(row => row.map(cell => {
+      let str = String(cell || '');
+      if (str.includes(fileDelimiter) || str.includes('"') || str.includes('\n')) {
+        return '"' + str.replace(/"/g, '""') + '"';
+      }
+      return str;
+    }).join(fileDelimiter)).join('\n');
+    
+    // 7. Save the temporary chunk to Drive
+    let tempFile = DriveApp.createFile(`temp_idx_chunk_${chunkNumber}_${fileName}`, newCsvText, MimeType.CSV);
+    tempFilesToDelete.push(tempFile);
+    tempFileUris.push(`https://drive.google.com/open?id=${tempFile.getId()}`);
+    
+    console.log(`[AUTO-CHUNK] Chunk ${chunkNumber} completed. Index reached ${globalRowIndex - 1}.`);
+    
+    startByte = endByte + 1;
+    chunkNumber++;
+  }
+  
+  return { tempFileUris: tempFileUris, tempFilesObjects: tempFilesToDelete };
 }
 
 // ============================================================================
-// 1. UI TRIGGER & UTILITIES
+// UI TRIGGER & UTILITIES 
 // ============================================================================
 function openBQProgressUI() {
   const html = HtmlService.createHtmlOutputFromFile('BQProgressUI')
-    .setWidth(600)
-    .setHeight(500)
-    .setTitle('BigQuery Ingestion Terminal');
+    .setWidth(600).setHeight(500).setTitle('BigQuery Ingestion Terminal');
   SpreadsheetApp.getUi().showModalDialog(html, 'Database Loader');
 }
 
 function cleanTableName(fileName) {
-  // Strip common extensions just in case
   let raw = fileName.replace(/\.csv$/i, '').replace(/\.xlsx?$/i, '').replace(/\.xlsb$/i, '');
   const map = { 'ä':'ae', 'ö':'oe', 'ü':'ue', 'Ä':'ae', 'Ö':'oe', 'Ü':'ue', 'ß':'ss' };
   let en = raw.replace(/[äöüÄÖÜß]/g, m => map[m]);
@@ -356,319 +466,261 @@ function cleanTableName(fileName) {
 }
 
 // ============================================================================
-// 2. SCHEMA DETECTOR WITH SMART PROFILING
+// FETCH READY FILES
 // ============================================================================
-// --- UPDATED: Added mimeType parameter to handle Google Sheets ---
-function buildDynamicSchema(fileId, headerRow, dataRow, forcedDelimiter, projectId, datasetId, mimeType, specialOptions) {
-  console.log(`[SCHEMA] Phase 1: Fetching file ID ${fileId} from Drive...`);
+function getReadyFiles() {
+  console.log("[INIT] Scanning '02_Ready' folder for files to import...");
+  const folder = DriveApp.getFolderById(READY_FOLDER_ID);
+  const files = folder.getFiles();
   
-  let url;
-  if (mimeType === MimeType.GOOGLE_SHEETS) {
-    // If it's a Google Sheet, we ask Google to export it as a CSV string on the fly
-    url = `https://docs.google.com/spreadsheets/d/${fileId}/export?format=csv`;
-  } else {
-    // Standard CSV media download
-    url = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`;
+  let fileMap = {};
+  let standaloneFiles = [];
+
+  while (files.hasNext()) {
+    let f = files.next();
+    let name = f.getName();
+    
+    let chunkMatch = name.match(/^(.*)__chunk_(\d+)\.csv$/i);
+    if (chunkMatch) {
+      let baseName = chunkMatch[1];
+      let chunkIndex = parseInt(chunkMatch[2], 10);
+      
+      if (!fileMap[baseName]) {
+        fileMap[baseName] = { id: baseName, name: baseName + '.csv', parts: [] };
+      }
+      fileMap[baseName].parts.push({ id: f.getId(), name: name, index: chunkIndex });
+    } else {
+      standaloneFiles.push({ id: f.getId(), name: name, mimeType: f.getMimeType() });
+    }
   }
+  
+  let chunkedFiles = Object.values(fileMap).map(grp => {
+    grp.parts.sort((a, b) => a.index - b.index);
+    return grp;
+  });
+
+  let finalList = standaloneFiles.concat(chunkedFiles);
+  console.log(`[INIT] Found ${finalList.length} datasets ready for import.`);
+  return finalList;
+}
+
+// ============================================================================
+// SCHEMA DETECTOR 
+// ============================================================================
+function buildDynamicSchema(fileId, headerRow, dataRow, forcedDelimiter, projectId, datasetId, mimeType, specialOptions) {
+  console.log(`[SCHEMA] Phase 1: Fetching file ID ${fileId}...`);
+  let url = mimeType === MimeType.GOOGLE_SHEETS 
+    ? `https://docs.google.com/spreadsheets/d/${fileId}/export?format=csv` 
+    : `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`;
 
   let response = UrlFetchApp.fetch(url, {
     headers: { 'Authorization': 'Bearer ' + ScriptApp.getOAuthToken(), 'Range': 'bytes=0-500000' },
     muteHttpExceptions: true
   });
   
-  console.log(`[SCHEMA] Phase 2: Parsing CSV text...`);
+  console.log(`[SCHEMA] Phase 2: Parsing CSV bytes...`);
   let rawText = response.getContentText();
   let lines = rawText.split(/\r?\n/);
-  const opts = specialOptions || {};
-  const keepColumnIndexes = opts.keepColumnIndexes || null;
-  const headerRowByColumn = opts.headerRowByColumn || null;
-  const typeOverrides = opts.typeOverrides || null;
   
-  // Smart Delimiter Detection
-  let fileDelimiter = forcedDelimiter;
-  if (!fileDelimiter) {
-    let firstLine = lines[0] || "";
-    let commaCount = (firstLine.match(/,/g) || []).length;
-    let semiCount = (firstLine.match(/;/g) || []).length;
-    fileDelimiter = semiCount > commaCount ? ';' : ',';
-    console.log(`[SCHEMA] Auto-detected delimiter: [${fileDelimiter}]`);
-  }
-
-  let rawHeaders = [];
-  let sampleRows = [];
+  const opts = specialOptions || {};
+  let fileDelimiter = forcedDelimiter || ((lines[0] || "").match(/;/g)?.length > (lines[0] || "").match(/,/g)?.length ? ';' : ',');
+  
+  let rawHeaders = [], sampleRows = [];
   try { 
     let parsed = Utilities.parseCsv(rawText, fileDelimiter); 
-    rawHeaders = buildRawHeaders_(parsed, lines, fileDelimiter, headerRow, headerRowByColumn, keepColumnIndexes);
+    rawHeaders = buildRawHeaders_(parsed, lines, fileDelimiter, headerRow, opts.headerRowByColumn, opts.keepColumnIndexes);
     sampleRows = parsed.slice(dataRow - 1, Math.min(parsed.length, dataRow - 1 + 40));
-    if (keepColumnIndexes && keepColumnIndexes.length) {
-      sampleRows = sampleRows.map(r => keepColumnIndexes.map(idx => (r && r[idx] != null ? r[idx] : '')));
-    }
+    if (opts.keepColumnIndexes) sampleRows = sampleRows.map(r => opts.keepColumnIndexes.map(idx => r && r[idx] != null ? r[idx] : ''));
   } catch(e) { 
-    rawHeaders = buildRawHeaders_(null, lines, fileDelimiter, headerRow, headerRowByColumn, keepColumnIndexes);
+    rawHeaders = buildRawHeaders_(null, lines, fileDelimiter, headerRow, opts.headerRowByColumn, opts.keepColumnIndexes);
     let fallback = (lines[dataRow - 1] || "").split(fileDelimiter);
-    if (keepColumnIndexes && keepColumnIndexes.length) {
-      fallback = keepColumnIndexes.map(idx => (fallback[idx] != null ? fallback[idx] : ''));
-    }
+    if (opts.keepColumnIndexes) fallback = opts.keepColumnIndexes.map(idx => fallback[idx] != null ? fallback[idx] : '');
     sampleRows = [fallback];
   }
 
-  console.log(`[SCHEMA] Phase 3: Translating headers to BigQuery format...`);
+  console.log(`[SCHEMA] Phase 3-4: Translating and Deduplicating headers...`);
   const map = { 'ä':'ae', 'ö':'oe', 'ü':'ue', 'Ä':'ae', 'Ö':'oe', 'Ü':'ue', 'ß':'ss' };
   let englishHeaders = rawHeaders.map(val => {
-    let en = String(val).replace(/[äöüÄÖÜß]/g, m => map[m]);
-    en = en.replace(/[^a-zA-Z0-9_]/g, '_').toLowerCase().replace(/_+/g, '_').replace(/^_|_$/g, '');
-    if (!en || /^[0-9]/.test(en)) en = 'col_' + en;
-    return en.substring(0, 290);
+    let en = String(val).replace(/[äöüÄÖÜß]/g, m => map[m]).replace(/[^a-zA-Z0-9_]/g, '_').toLowerCase().replace(/_+/g, '_').replace(/^_|_$/g, '');
+    return (!en || /^[0-9]/.test(en)) ? 'col_' + en : en.substring(0, 290);
   });
 
-  console.log(`[SCHEMA] Phase 4: Deduplicating headers...`);
-  let used = new Set();
+  let used = new Set(), finalSchemaFields = [];
   for(let i = 0; i < englishHeaders.length; i++) {
     let f = englishHeaders[i];
-    let c = 1;
-    while(used.has(f) && c < 500) { f = englishHeaders[i] + '_' + c; c++; }
-    used.add(f);
-    englishHeaders[i] = f;
-  }
-
-  console.log(`[SCHEMA] Phase 5: Resolving datatypes from mappings + profiling...`);
-  let finalSchemaFields = [];
-  
-  for(let i = 0; i < englishHeaders.length; i++) {
-    let colName = englishHeaders[i];
-    let sampleValues = sampleRows.map(r => (r && r[i] != null ? r[i] : ''));
-    let detectedType = resolveColumnTypeWithOverrides_(colName, sampleValues, fileDelimiter, typeOverrides);
-    if (TYPE_OVERRIDES[colName]) {
-      console.log(`   -> Exact override: ${colName} => ${detectedType}`);
+    
+    if (opts.renameColumns && opts.renameColumns[f]) {
+      f = opts.renameColumns[f];
     }
     
-    finalSchemaFields.push({ name: colName, type: detectedType });
+    let c = 1;
+    let baseName = f;
+    while(used.has(f) && c < 500) { f = baseName + '_' + c++; }
+    used.add(f);
+    
+    let sampleValues = sampleRows.map(r => r && r[i] != null ? r[i] : '');
+    let detectedType = resolveColumnTypeWithOverrides_(f, sampleValues, fileDelimiter, opts.typeOverrides);
+    
+    finalSchemaFields.push({ name: f, type: detectedType });
   }
   
-  console.log(`[SCHEMA] Schema successfully built!`);
   return { schema: finalSchemaFields, delimiter: fileDelimiter };
 }
 
 // ============================================================================
-// 3. PROCESS SINGLE FILE WITH VERBOSE LOGGING AND SQL CASCADE
+// MAIN PIPELINE: PROCESS SINGLE FILE WITH INDEXING AND ORDER BY
 // ============================================================================
 function processSingleBQFile(fileObj) {
   const archiveFolder = DriveApp.getFolderById(ARCHIVE_FOLDER_ID);
   const file = DriveApp.getFileById(fileObj.id);
   const lowerName = fileObj.name.toLowerCase();
   
-  console.log(`\n======================================================`);
-  console.log(`[SERVER] STARTING IMPORT PIPELINE: ${fileObj.name}`);
-  console.log(`======================================================`);
+  console.log(`\n======================================================\n[SERVER] STARTING IMPORT PIPELINE: ${fileObj.name}\n======================================================`);
   
-  let headerRow = 1; 
-  let dataRow = 2;
-  let forcedDelimiter = null; 
+  let headerRow = 1, dataRow = 2, forcedDelimiter = null; 
   let specialOptions = getSpecialFileOptions_(lowerName) || {};
   
-  for (let i = 0; i < FILE_RULES.length; i++) {
-    if (lowerName.includes(FILE_RULES[i].keyword)) {
-      headerRow = FILE_RULES[i].headerRow;
-      dataRow = FILE_RULES[i].dataRow;
-      forcedDelimiter = FILE_RULES[i].delimiter || null;
-      console.log(`[SERVER] Match found! Rule: ${FILE_RULES[i].keyword}. Header: ${headerRow}, Data: ${dataRow}`);
-      break;
-    }
+  let ruleMatch = FILE_RULES.find(r => lowerName.includes(r.keyword));
+  if (ruleMatch) {
+    headerRow = ruleMatch.headerRow; dataRow = ruleMatch.dataRow; forcedDelimiter = ruleMatch.delimiter || null;
   }
-
   if (specialOptions.headerRow) headerRow = specialOptions.headerRow;
   if (specialOptions.dataRow) dataRow = specialOptions.dataRow;
 
-  // Chunked CSV files are already normalized: header row 1, data row 2, comma-delimited.
-  let isChunked = !!(fileObj.parts && fileObj.parts.length > 0);
-  if (isChunked) {
-    headerRow = 1;
-    dataRow = 2;
-    forcedDelimiter = null;
-    console.log(`[SERVER] Chunked import detected (${fileObj.parts.length} parts). Using normalized CSV defaults.`);
-  }
-
   let tableName = cleanTableName(fileObj.name);
   let tempTableId = tableName + '_temp_ext'; 
-  console.log(`[SERVER] Target Table: ${tableName}`);
+  
+  let tempFilesToDelete = []; 
   
   try {
-    console.log(`[SERVER] Cleaning up old temp tables...`);
     try { BigQuery.Tables.remove(GCP_PROJECT_ID, DATASET_ID, tempTableId); } catch (e) { }
 
-    let schemaData = buildDynamicSchema(fileObj.id, headerRow, dataRow, forcedDelimiter, GCP_PROJECT_ID, DATASET_ID, fileObj.mimeType, specialOptions);
-    let finalSchema = schemaData.schema;
-    let fileDelimiter = schemaData.delimiter;
+    let { schema: finalSchema, delimiter: fileDelimiter } = buildDynamicSchema(fileObj.id, headerRow, dataRow, forcedDelimiter, GCP_PROJECT_ID, DATASET_ID, fileObj.mimeType, specialOptions);
 
-    console.log(`[SERVER] Creating Ghost Table...`);
-    let ghostSchemaFields = finalSchema.map(f => ({ name: f.name, type: 'STRING' }));
     let isSheet = fileObj.mimeType === MimeType.GOOGLE_SHEETS;
+    let externalUris = [];
 
-    // Build source URIs – chunked imports pass all parts so BQ reads them as one table.
-    let sourceUris;
-    if (isChunked) {
-      sourceUris = fileObj.parts.map(function(p) { return 'https://drive.google.com/open?id=' + p.id; });
-    } else if (isSheet) {
-      sourceUris = [`https://docs.google.com/spreadsheets/d/${fileObj.id}`];
+    // AUTO-CHUNKER & INDEX INJECTION
+    if (!isSheet && fileDelimiter) {
+      console.log(`[PRE-PROCESS] Injecting 'index' column into CSV...`);
+      finalSchema.unshift({ name: 'index', type: 'INT64' }); // Ensure name is "index"
+      
+      let chunkData = autoChunkAndIndexMassiveCsv_(fileObj.id, fileObj.name, fileDelimiter, headerRow, dataRow);
+      
+      externalUris = chunkData.tempFileUris;
+      tempFilesToDelete = chunkData.tempFilesObjects;
+      
     } else {
-      sourceUris = [`https://drive.google.com/open?id=${fileObj.id}`];
+      externalUris = [`https://docs.google.com/spreadsheets/d/${fileObj.id}`];
     }
 
     let externalDataConfiguration = {
-      sourceUris: sourceUris,
+      sourceUris: externalUris, 
       sourceFormat: isSheet ? "GOOGLE_SHEETS" : "CSV",
-      autodetect: false
+      autodetect: false,
+      ignoreUnknownValues: true
     };
-
-    if (specialOptions.keepColumnIndexes && specialOptions.keepColumnIndexes.length) {
-      externalDataConfiguration.ignoreUnknownValues = true;
-    }
 
     if (isSheet) {
       externalDataConfiguration.googleSheetsOptions = { skipLeadingRows: dataRow - 1 };
       let limitedRange = buildSheetRangeFromColumnIndexes_(specialOptions.keepColumnIndexes || []);
       if (limitedRange) externalDataConfiguration.googleSheetsOptions.range = limitedRange;
     } else {
-      externalDataConfiguration.csvOptions = { skipLeadingRows: dataRow - 1, allowQuotedNewlines: true, fieldDelimiter: fileDelimiter };
+      externalDataConfiguration.csvOptions = { 
+        skipLeadingRows: 0, 
+        allowQuotedNewlines: true, 
+        fieldDelimiter: fileDelimiter,
+        allowJaggedRows: true  // <--- ACEASTA ESTE REZOLVAREA
+      };
     }
 
-    let tableResource = {
+    BigQuery.Tables.insert({
       tableReference: { projectId: GCP_PROJECT_ID, datasetId: DATASET_ID, tableId: tempTableId },
-      schema: { fields: ghostSchemaFields }, 
-      externalDataConfiguration: externalDataConfiguration
-    };
-    
-    BigQuery.Tables.insert(tableResource, GCP_PROJECT_ID, DATASET_ID);
+      schema: { fields: finalSchema.map(f => ({ name: f.name, type: 'STRING' })) }, 
+      externalDataConfiguration
+    }, GCP_PROJECT_ID, DATASET_ID);
 
-    console.log(`[SERVER] Compiling dynamic SAFE_CAST SQL...`);
     let selectCols = finalSchema.map(f => {
       let colName = `\`${f.name}\``;
-      let cleanStr = `CASE WHEN LOWER(TRIM(${colName})) IN ('', 'null', '-') THEN NULL ELSE TRIM(${colName}) END`;
-      let sqlType = f.type.toUpperCase();
+      let cleanStr = `CASE WHEN LOWER(TRIM(${colName})) IN ('', 'null', '-') OR STARTS_WITH(TRIM(${colName}), '#') THEN NULL ELSE TRIM(${colName}) END`;
+      let noCurrency = `REGEXP_REPLACE(${cleanStr}, r'[^0-9,.-]', '')`;
+      let isEuFormat = fileDelimiter === ';';
 
-      if (sqlType === 'BIGNUMERIC') {
-        let noCurrency = `REGEXP_REPLACE(${cleanStr}, r'[^0-9,.-]', '')`;
-        if (fileDelimiter === ';') {
-          return `SAFE_CAST(REPLACE(REPLACE(${noCurrency}, '.', ''), ',', '.') AS BIGNUMERIC) AS ${colName}`;
-        } else {
-          return `SAFE_CAST(REPLACE(${noCurrency}, ',', '') AS BIGNUMERIC) AS ${colName}`;
-        }
+      switch (f.type.toUpperCase()) {
+        case 'BIGNUMERIC': case 'NUMERIC': case 'FLOAT64':
+          let replaceStr = isEuFormat ? `REPLACE(REPLACE(${noCurrency}, '.', ''), ',', '.')` : `REPLACE(${noCurrency}, ',', '')`;
+          return `SAFE_CAST(${replaceStr} AS ${f.type.toUpperCase()}) AS ${colName}`;
+        case 'INT64':
+          return isEuFormat ? `SAFE_CAST(REPLACE(REPLACE(${noCurrency}, '.', ''), ',', '') AS INT64) AS ${colName}` : `SAFE_CAST(SAFE_CAST(REPLACE(${noCurrency}, ',', '') AS NUMERIC) AS INT64) AS ${colName}`;
+        case 'DATE':
+          return `
+            COALESCE(
+              SAFE.PARSE_DATE('%Y-%m-%d', REGEXP_EXTRACT(${cleanStr}, r'[0-9]{4}-[0-9]{1,2}-[0-9]{1,2}')),
+              SAFE.PARSE_DATE('%d.%m.%Y', REGEXP_EXTRACT(${cleanStr}, r'[0-9]{1,2}\\.[0-9]{1,2}\\.[0-9]{4}')),
+              SAFE.PARSE_DATE('%Y/%m/%d', REGEXP_EXTRACT(${cleanStr}, r'[0-9]{4}/[0-9]{1,2}/[0-9]{1,2}')),
+              SAFE.PARSE_DATE('%d/%m/%Y', REGEXP_EXTRACT(${cleanStr}, r'[0-9]{1,2}/[0-9]{1,2}/[0-9]{4}')),
+              SAFE.PARSE_DATE('%m/%d/%Y', REGEXP_EXTRACT(${cleanStr}, r'[0-9]{1,2}/[0-9]{1,2}/[0-9]{4}')),
+              
+              SAFE_CAST(SUBSTR(${cleanStr}, 1, 10) AS DATE),
+              
+              CASE 
+                WHEN REGEXP_CONTAINS(${cleanStr}, r'^[0-9]{4,5}([,.][0-9]+)?$') 
+                THEN DATE_ADD(DATE '1899-12-30', INTERVAL SAFE_CAST(REGEXP_EXTRACT(${cleanStr}, r'^([0-9]{4,5})') AS INT64) DAY)
+                ELSE NULL 
+              END
+            ) AS ${colName}`.trim();
+        case 'BOOL':
+          return `CASE WHEN LOWER(TRIM(${colName})) IN ('true', '1', 'yes', 'ja') THEN TRUE WHEN LOWER(TRIM(${colName})) IN ('false', '0', 'no', 'nein') THEN FALSE ELSE NULL END AS ${colName}`;
+        default:
+          return `${cleanStr} AS ${colName}`;
       }
-      else if (sqlType === 'NUMERIC') {
-        let noCurrency = `REGEXP_REPLACE(${cleanStr}, r'[^0-9,.-]', '')`;
-        if (fileDelimiter === ';') {
-          return `SAFE_CAST(REPLACE(REPLACE(${noCurrency}, '.', ''), ',', '.') AS NUMERIC) AS ${colName}`;
-        } else {
-          return `SAFE_CAST(REPLACE(${noCurrency}, ',', '') AS NUMERIC) AS ${colName}`;
-        }
-      } 
-      else if (sqlType === 'INT64') {
-        let noCurrency = `REGEXP_REPLACE(${cleanStr}, r'[^0-9,.-]', '')`;
-        if (fileDelimiter === ';') {
-          return `SAFE_CAST(REPLACE(REPLACE(${noCurrency}, '.', ''), ',', '') AS INT64) AS ${colName}`;
-        } else {
-          return `SAFE_CAST(SAFE_CAST(REPLACE(${noCurrency}, ',', '') AS NUMERIC) AS INT64) AS ${colName}`;
-        }
-      } 
-      else if (sqlType === 'DATE') {
-        // Support multiple date layouts: ISO, dd/MM/yyyy, MM/dd/yyyy, dd.MM.yyyy,
-        // MM-dd-yyyy and 2-digit year variants while staying safe for malformed values.
-        return `
-          COALESCE(
-            SAFE_CAST(SUBSTR(${cleanStr}, 1, 10) AS DATE),
-            SAFE.PARSE_DATE('%Y/%m/%d', REGEXP_EXTRACT(${cleanStr}, r'^[0-9]{4}/[0-9]{1,2}/[0-9]{1,2}')),
-            SAFE.PARSE_DATE('%Y.%m.%d', REGEXP_EXTRACT(${cleanStr}, r'^[0-9]{4}\\.[0-9]{1,2}\\.[0-9]{1,2}')),
-            SAFE.PARSE_DATE('%Y-%m-%d', REGEXP_EXTRACT(${cleanStr}, r'^[0-9]{4}-[0-9]{1,2}-[0-9]{1,2}')),
-            SAFE.PARSE_DATE('%d/%m/%Y', REGEXP_EXTRACT(${cleanStr}, r'^[0-9]{1,2}/[0-9]{1,2}/[0-9]{4}')),
-            SAFE.PARSE_DATE('%m/%d/%Y', REGEXP_EXTRACT(${cleanStr}, r'^[0-9]{1,2}/[0-9]{1,2}/[0-9]{4}')),
-            SAFE.PARSE_DATE('%d.%m.%Y', REGEXP_EXTRACT(${cleanStr}, r'^[0-9]{1,2}\\.[0-9]{1,2}\\.[0-9]{4}')),
-            SAFE.PARSE_DATE('%m.%d.%Y', REGEXP_EXTRACT(${cleanStr}, r'^[0-9]{1,2}\\.[0-9]{1,2}\\.[0-9]{4}')),
-            SAFE.PARSE_DATE('%d-%m-%Y', REGEXP_EXTRACT(${cleanStr}, r'^[0-9]{1,2}-[0-9]{1,2}-[0-9]{4}')),
-            SAFE.PARSE_DATE('%m-%d-%Y', REGEXP_EXTRACT(${cleanStr}, r'^[0-9]{1,2}-[0-9]{1,2}-[0-9]{4}')),
-            SAFE.PARSE_DATE('%d/%m/%y', REGEXP_EXTRACT(${cleanStr}, r'^[0-9]{1,2}/[0-9]{1,2}/[0-9]{2}')),
-            SAFE.PARSE_DATE('%m/%d/%y', REGEXP_EXTRACT(${cleanStr}, r'^[0-9]{1,2}/[0-9]{1,2}/[0-9]{2}')),
-            SAFE.PARSE_DATE('%d.%m.%y', REGEXP_EXTRACT(${cleanStr}, r'^[0-9]{1,2}\\.[0-9]{1,2}\\.[0-9]{2}')),
-            SAFE.PARSE_DATE('%m.%d.%y', REGEXP_EXTRACT(${cleanStr}, r'^[0-9]{1,2}\\.[0-9]{1,2}\\.[0-9]{2}')),
-            SAFE.PARSE_DATE('%d-%m-%y', REGEXP_EXTRACT(${cleanStr}, r'^[0-9]{1,2}-[0-9]{1,2}-[0-9]{2}')),
-            SAFE.PARSE_DATE('%m-%d-%y', REGEXP_EXTRACT(${cleanStr}, r'^[0-9]{1,2}-[0-9]{1,2}-[0-9]{2}'))
-          ) AS ${colName}
-        `.trim();
-      }
-      else if (sqlType === 'BOOL') {
-        return `
-          CASE
-            WHEN LOWER(TRIM(${colName})) IN ('true', '1', 'yes', 'ja') THEN TRUE
-            WHEN LOWER(TRIM(${colName})) IN ('false', '0', 'no', 'nein') THEN FALSE
-            ELSE NULL
-          END AS ${colName}
-        `.trim();
-      } 
-      else {
-        return `${cleanStr} AS ${colName}`;
-      }
-    }).join(',\n          ');
+    }).join(',\n      ');
 
-    let insertHeaders = finalSchema.map(f => `\`${f.name}\``).join(', ');
+    // ANCHOR FIX: Cast column to STRING before applying TRIM to avoid type errors on INT64/FLOAT64
+    let schemaForAnchor = finalSchema.filter(f => f.name !== 'index');
+    let anchorFields = schemaForAnchor.slice(0, 3).map(f => `\`${f.name}\` IS NOT NULL AND LOWER(TRIM(CAST(\`${f.name}\` AS STRING))) != LOWER('${f.name}')`); 
+    let anchorCondition = anchorFields.length > 0 ? anchorFields.join(' OR ') : '1=1';
 
+    // SQL EXECUTION WITH FINAL "ORDER BY `index` ASC"
     let query = `
-      CREATE OR REPLACE TABLE \`${GCP_PROJECT_ID}.${DATASET_ID}.${tableName}\` (
-        ${finalSchema.map(f => `\`${f.name}\` ${f.type}`).join(', ')}
-      );
-      
-      INSERT INTO \`${GCP_PROJECT_ID}.${DATASET_ID}.${tableName}\` (${insertHeaders})
-      SELECT ${selectCols} FROM \`${GCP_PROJECT_ID}.${DATASET_ID}.${tempTableId}\`;
+      CREATE OR REPLACE TABLE \`${GCP_PROJECT_ID}.${DATASET_ID}.${tableName}\` AS
+      SELECT * FROM (
+        SELECT ${selectCols} FROM \`${GCP_PROJECT_ID}.${DATASET_ID}.${tempTableId}\`
+        WHERE SAFE_CAST(\`index\` AS INT64) IS NOT NULL 
+      )
+      WHERE ${anchorCondition}
+      ORDER BY \`index\` ASC;
     `;
 
-    console.log(`[SERVER] Sending SQL job to BigQuery...`);
-    let queryJobConfig = { configuration: { query: { query: query, useLegacySql: false } } };
-    let insertedJob = BigQuery.Jobs.insert(queryJobConfig, GCP_PROJECT_ID);
-    let jobId = insertedJob.jobReference.jobId;
-    let jobLocation = insertedJob.jobReference.location; 
-    
-    console.log(`[SERVER] Job ID ${jobId} successfully submitted. Beginning polling loop...`);
-    
-    let maxAttempts = 150; 
-    let success = false;
-    let errorMsg = "";
+    let insertedJob = BigQuery.Jobs.insert({ configuration: { query: { query: query, useLegacySql: false } } }, GCP_PROJECT_ID);
 
+    let [maxAttempts, success, errorMsg] = [300, false, ""];
     for (let i = 0; i < maxAttempts; i++) {
       try {
-        let job = BigQuery.Jobs.get(GCP_PROJECT_ID, jobId, { location: jobLocation });
-        console.log(`   -> Polling [${i+1}/${maxAttempts}]: State is ${job.status.state}`);
-        
+        let job = BigQuery.Jobs.get(GCP_PROJECT_ID, insertedJob.jobReference.jobId, { location: insertedJob.jobReference.location });
         if (job.status.state === 'DONE') {
           if (job.status.errorResult) errorMsg = job.status.errorResult.message;
           else success = true;
           break;
         }
-      } catch (pollError) {
-        console.log(`   -> Minor API hiccup (${pollError.message}). Retrying...`);
-      }
-      Utilities.sleep(2000); 
+      } catch (e) { }
+      Utilities.sleep(3000);
     }
 
-    console.log(`[SERVER] Cleaning up Ghost Table...`);
     try { BigQuery.Tables.remove(GCP_PROJECT_ID, DATASET_ID, tempTableId); } catch(e) {}
     
+    // CLEANUP: Trash temporary chunk files in Drive
+    tempFilesToDelete.forEach(f => { try { f.setTrashed(true); } catch(e) {} });
+    
     if (success) {
-      console.log(`[SUCCESS] BigQuery import successful. Moving file(s) to Archive...`);
-      if (isChunked) {
-        fileObj.parts.forEach(function(p) { DriveApp.getFileById(p.id).moveTo(archiveFolder); });
-      } else {
-        file.moveTo(archiveFolder);
-      }
-      return { success: true, log: `[SUCCESS] Injected into '${tableName}'. Moved to Archive.` };
-    } else if (errorMsg) {
-      console.error(`[CRASH] BigQuery rejected the file: ${errorMsg}`);
-      return { success: false, log: `[ERROR] BigQuery rejected ${fileObj.name}: ${errorMsg}` };
-    } else {
-      console.error(`[CRASH] Polling timed out after 5 minutes.`);
-      return { success: false, log: `[ERROR] Timeout waiting for database.` };
-    }
+      file.moveTo(archiveFolder); 
+      return { success: true, log: `[SUCCESS] Injected into '${tableName}' ordered by index. Original moved to Archive.` };
+    } 
+    return { success: false, log: errorMsg ? `[ERROR] BigQuery rejected: ${errorMsg}` : `[ERROR] Timeout.` };
     
   } catch (error) {
-    console.error(`[CRASH] Critical Pipeline Error: ${error.message}`);
     try { BigQuery.Tables.remove(GCP_PROJECT_ID, DATASET_ID, tempTableId); } catch(e){}
+    tempFilesToDelete.forEach(f => { try { f.setTrashed(true); } catch(e){} });
     return { success: false, log: `[CRITICAL] Connection failed: ${error.message}` };
   }
 }
