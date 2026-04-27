@@ -4,16 +4,17 @@
 const EQ_PROJECT_ID = 'sit-ldl-int-oi-a-lvzt-run-818b';
 const EQ_DATASET_ID = 'staging';
 const EQ_OUTPUT_TABLE_ID = 'lagerliste_komplett';
+const EQ_OUTPUT_SHEET_NAME = 'Lagerliste Komplett';
 
 // Stored procedures to execute in order
 const EQ_PROCEDURES = [
   {
-    name: 'sp_build_export_pt',
+    name: 'sp_export_pt',
     label: 'Export PT',
     call: `CALL \`${EQ_PROJECT_ID}.${EQ_DATASET_ID}.sp_export_pt\`()`
   },
   {
-    name: 'sp_build_rwa_pq',
+    name: 'sp_rwa_pq',
     label: 'RWA PQ',
     call: `CALL \`${EQ_PROJECT_ID}.${EQ_DATASET_ID}.sp_rwa_pq\`()`
   },
@@ -271,7 +272,7 @@ function createLagerlisteConnectedSheet() {
   try {
     const ss = SpreadsheetApp.getActiveSpreadsheet();
     SpreadsheetApp.enableBigQueryExecution();
-    const removedCount = removeExistingLagerlisteConnectedSheets_(ss, EQ_OUTPUT_TABLE_ID);
+    const removedCount = removeExistingLagerlisteConnectedSheets_(ss, EQ_OUTPUT_SHEET_NAME);
     const source = resolveConnectedSheetSource_();
 
     const spec = SpreadsheetApp.newDataSourceSpec()
@@ -283,11 +284,12 @@ function createLagerlisteConnectedSheet() {
       .build();
 
     const dataSourceSheet = ss.insertDataSourceSheet(spec);
-    const createdSheet = resolveSheetFromDataSource_(ss, dataSourceSheet);
-    const sheetName = EQ_OUTPUT_TABLE_ID;
-    if (createdSheet) {
-      createdSheet.setName(sheetName);
+    const createdSheet = resolveSheetFromDataSource_(ss, dataSourceSheet) || findCreatedConnectedSheet_(ss);
+    const sheetName = EQ_OUTPUT_SHEET_NAME;
+    if (!createdSheet) {
+      throw new Error('Could not resolve created Connected Sheet for renaming.');
     }
+    createdSheet.setName(sheetName);
     dataSourceSheet.refreshData();
 
     return {
@@ -312,7 +314,7 @@ function removeExistingLagerlisteConnectedSheets_(spreadsheet, baseName) {
   const sheets = spreadsheet.getSheets();
   const toDelete = sheets.filter(function (s) {
     const name = s.getName();
-    return name === baseName || name.indexOf(baseName + '_') === 0;
+    return name === baseName || name === EQ_OUTPUT_TABLE_ID || name.indexOf(baseName + '_') === 0 || name.indexOf(EQ_OUTPUT_TABLE_ID + '_') === 0;
   });
 
   toDelete.forEach(function (sheet) {
@@ -352,6 +354,22 @@ function resolveSheetFromDataSource_(spreadsheet, dataSourceSheet) {
   }
 
   return null;
+}
+
+function findCreatedConnectedSheet_(spreadsheet) {
+  const sheets = spreadsheet.getSheets();
+  if (!sheets || sheets.length === 0) {
+    return null;
+  }
+
+  const byTableName = sheets.find(function (s) {
+    return s.getName() === EQ_OUTPUT_TABLE_ID;
+  });
+  if (byTableName) {
+    return byTableName;
+  }
+
+  return sheets[sheets.length - 1] || null;
 }
 
 function getExecuteQueriesConfig() {
