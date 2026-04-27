@@ -3,7 +3,7 @@
 // ============================================================================
 const EQ_PROJECT_ID = 'sit-ldl-int-oi-a-lvzt-run-818b';
 const EQ_DATASET_ID = 'staging';
-const EQ_OUTPUT_TABLE_ID = 'lagerliste_komplett_final';
+const EQ_OUTPUT_TABLE_ID = 'lagerliste_komplett';
 
 // Stored procedures to execute in order
 const EQ_PROCEDURES = [
@@ -18,14 +18,14 @@ const EQ_PROCEDURES = [
     call: `CALL \`${EQ_PROJECT_ID}.${EQ_DATASET_ID}.sp_rwa_pq\`()`
   },
   {
-    name: 'sp_build_aktionsplan_int_pq',
+    name: 'sp_aktionsplan_int_pq',
     label: 'Aktionsplan INT PQ',
-    call: `CALL \`${EQ_PROJECT_ID}.${EQ_DATASET_ID}.sp_build_aktionsplan_int_pq\`()`
+    call: `CALL \`${EQ_PROJECT_ID}.${EQ_DATASET_ID}.sp_aktionsplan_int_pq\`()`
   },
   {
-    name: 'sp_generate_lagerliste_komplett_final',
-    label: 'Generate Lagerliste Komplett Final',
-    call: `CALL \`${EQ_PROJECT_ID}.${EQ_DATASET_ID}.sp_generate_lagerliste_komplett_final\`()`
+    name: 'sp_lagerliste_komplett',
+    label: 'Lagerliste Komplett',
+    call: `CALL \`${EQ_PROJECT_ID}.${EQ_DATASET_ID}.sp_lagerliste_komplett\`()`
   }
 ];
 
@@ -269,14 +269,9 @@ function pollStoredProcedure(index, jobId, location) {
 // ============================================================================
 function createLagerlisteConnectedSheet() {
   try {
-    const folderCfg = getPipelineFolderConfig();
-    const outputFolder = DriveApp.getFolderById(folderCfg.output.id);
-
-    const now = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyyMMdd_HHmmss');
-    const fileName = `lagerliste_komplett_final_${now}`;
-
-    const ss = SpreadsheetApp.create(fileName);
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
     SpreadsheetApp.enableBigQueryExecution();
+    const removedCount = removeExistingLagerlisteConnectedSheets_(ss, EQ_OUTPUT_TABLE_ID);
 
     const spec = SpreadsheetApp.newDataSourceSpec()
       .asBigQuery()
@@ -287,18 +282,20 @@ function createLagerlisteConnectedSheet() {
       .build();
 
     const dataSourceSheet = ss.insertDataSourceSheet(spec);
+    const createdSheet = resolveSheetFromDataSource_(ss, dataSourceSheet);
+    const sheetName = EQ_OUTPUT_TABLE_ID;
+    if (createdSheet) {
+      createdSheet.setName(sheetName);
+    }
     dataSourceSheet.refreshData();
-
-    const file = DriveApp.getFileById(ss.getId());
-    outputFolder.addFile(file);
-    DriveApp.getRootFolder().removeFile(file);
 
     return {
       success: true,
       spreadsheetId: ss.getId(),
       spreadsheetUrl: ss.getUrl(),
-      outputFolderName: folderCfg.output.name,
-      log: `[SUCCESS] lagerliste_komplett_final saved in ${folderCfg.output.name}.`
+      sheetName,
+      replacedSheets: removedCount,
+      log: `[SUCCESS] Connected Sheet recreated in current spreadsheet: ${sheetName}`
     };
   } catch (e) {
     return {
@@ -308,12 +305,45 @@ function createLagerlisteConnectedSheet() {
   }
 }
 
+function removeExistingLagerlisteConnectedSheets_(spreadsheet, baseName) {
+  const sheets = spreadsheet.getSheets();
+  const toDelete = sheets.filter(function (s) {
+    const name = s.getName();
+    return name === baseName || name.indexOf(baseName + '_') === 0;
+  });
+
+  toDelete.forEach(function (sheet) {
+    spreadsheet.deleteSheet(sheet);
+  });
+
+  return toDelete.length;
+}
+
+function resolveSheetFromDataSource_(spreadsheet, dataSourceSheet) {
+  if (!dataSourceSheet) {
+    return null;
+  }
+
+  // `insertDataSourceSheet` returns DataSourceSheet; rename must run on Sheet.
+  if (typeof dataSourceSheet.getSheet === 'function') {
+    return dataSourceSheet.getSheet();
+  }
+
+  if (typeof dataSourceSheet.getSheetId === 'function') {
+    const targetId = dataSourceSheet.getSheetId();
+    const match = spreadsheet.getSheets().find(function (s) {
+      return s.getSheetId() === targetId;
+    });
+    return match || null;
+  }
+
+  return null;
+}
+
 function getExecuteQueriesConfig() {
-  const folderCfg = getPipelineFolderConfig();
   return {
     totalProcedures: EQ_PROCEDURES.length,
-    procedureLabels: EQ_PROCEDURES.map(function (p) { return p.label; }),
-    outputFolderName: folderCfg.output.name
+    procedureLabels: EQ_PROCEDURES.map(function (p) { return p.label; })
   };
 }
 

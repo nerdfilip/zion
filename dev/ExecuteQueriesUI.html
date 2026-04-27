@@ -105,8 +105,6 @@
 
         PROCEDURE_LABELS = config.procedureLabels || [];
         TOTAL_STEPS = (config.totalProcedures || 0) + 1; // +1 for Connected Sheet step
-
-        log('> Folder 04_Output resolved: ' + (config.outputFolderName || 'N/A'), 'log-info');
         executeProcedureStep(0);
       }
 
@@ -204,7 +202,7 @@
 
       function runConnectedSheetStep() {
         const stepNo = PROCEDURE_LABELS.length + 1;
-        setStatus('Creating Connected Sheet in 04_Output...');
+        setStatus('Creating Connected Sheet in current spreadsheet...');
         log('> Step ' + stepNo + '/' + TOTAL_STEPS + ': Create Connected Sheet (lagerliste_komplett_final)', 'log-info');
         setProgress((stepNo - 1) / TOTAL_STEPS + 0.05);
         isRunning = true;
@@ -224,7 +222,7 @@
           return finish(false, true);
         }
 
-        log('[SUCCESS] lagerliste_komplett_final saved in ' + (result.outputFolderName || '04_Outputs') + '.', 'log-success');
+        log('[SUCCESS] Connected Sheet created in current file: ' + (result.sheetName || 'lagerliste_komplett_final') + '.', 'log-success');
         setProgress(1.0);
         finish(false, false);
       }
