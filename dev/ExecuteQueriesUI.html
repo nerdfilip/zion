@@ -79,7 +79,11 @@
       let isHalted = false;
       let isRunning = false;
       let startTime, timerInterval;
-      const TOTAL_STEPS = 3;
+      let TOTAL_STEPS = 0;
+      let PROCEDURE_LABELS = [];
+      let pollTimer = null;
+      let currentJob = null;
+      let pollInFlight = false;
 
       window.onload = function () {
         startRun();
@@ -88,67 +92,139 @@
       function startRun() {
         isRunning = true;
         startTimer();
-        setStatus('Preparing stored procedures pipeline...');
+        setStatus('Preparing stored procedures pipeline and loading folder config...');
         log('> Starting stored procedures pipeline...', 'log-info');
-        log('> Step 1/' + TOTAL_STEPS + ': sp_build_export_pt', 'log-info');
-        setProgress(0.05);
-
         google.script.run
-          .withSuccessHandler(onStep1Completed)
+          .withSuccessHandler(onConfigLoaded)
           .withFailureHandler(onFatalError)
-          .executeStoredProcedure(0);
+          .getExecuteQueriesConfig();
       }
 
-      function onStep1Completed(result) {
-        isRunning = false;
+      function onConfigLoaded(config) {
         if (isHalted) return finish(true, false);
 
-        log(result.log, result.success ? 'log-success' : 'log-error');
+        PROCEDURE_LABELS = config.procedureLabels || [];
+        TOTAL_STEPS = (config.totalProcedures || 0) + 1; // +1 for Connected Sheet step
+
+        log('> Folder 04_Output resolved: ' + (config.outputFolderName || 'N/A'), 'log-info');
+        executeProcedureStep(0);
+      }
+
+      function executeProcedureStep(index) {
+        isRunning = true;
+        const stepNo = index + 1;
+        const label = PROCEDURE_LABELS[index] || ('Procedure ' + stepNo);
+        setStatus('Starting ' + label + '...');
+        log('> Step ' + stepNo + '/' + TOTAL_STEPS + ': ' + label, 'log-info');
+        setProgress(index / TOTAL_STEPS + 0.03);
+
+        google.script.run
+          .withSuccessHandler(function (result) { onProcedureStarted(index, result); })
+          .withFailureHandler(onFatalError)
+          .startStoredProcedure(index);
+      }
+
+      function onProcedureStarted(index, result) {
+        if (isHalted) return finish(true, false);
+
         if (!result.success) {
+          log(result.log, 'log-error');
           return finish(false, true);
         }
 
-        setStatus('Export PT complete. Starting RWA PQ...');
-        log('> Step 2/' + TOTAL_STEPS + ': sp_build_rwa_pq', 'log-info');
-        setProgress(0.35);
+        log(result.log, 'log-info');
+        currentJob = {
+          index: index,
+          jobId: result.jobId,
+          location: result.location,
+          polls: 0
+        };
+
+        startPollingCurrentProcedure();
+      }
+
+      function startPollingCurrentProcedure() {
+        stopPollingCurrentProcedure();
+        pollInFlight = false;
+        pollTimer = setInterval(function () {
+          if (isHalted || !currentJob || pollInFlight) return;
+
+          pollInFlight = true;
+          currentJob.polls += 1;
+          google.script.run
+            .withSuccessHandler(onProcedurePolled)
+            .withFailureHandler(function (err) {
+              pollInFlight = false;
+              onFatalError(err);
+            })
+            .pollStoredProcedure(currentJob.index, currentJob.jobId, currentJob.location);
+        }, 2000);
+      }
+
+      function stopPollingCurrentProcedure() {
+        if (pollTimer) {
+          clearInterval(pollTimer);
+          pollTimer = null;
+        }
+        pollInFlight = false;
+      }
+
+      function onProcedurePolled(result) {
+        pollInFlight = false;
+        isRunning = false;
+        if (isHalted) return finish(true, false);
+
+        if (!result.success && result.done) {
+          stopPollingCurrentProcedure();
+          log(result.log, 'log-error');
+          return finish(false, true);
+        }
+
+        if (!result.done) {
+          setStatus('Running ' + PROCEDURE_LABELS[currentJob.index] + '...');
+          return;
+        }
+
+        stopPollingCurrentProcedure();
+        log(result.log, 'log-success');
+
+        const completedSteps = currentJob.index + 1;
+        setProgress(completedSteps / TOTAL_STEPS);
+
+        const nextIndex = currentJob.index + 1;
+        currentJob = null;
+
+        if (nextIndex < PROCEDURE_LABELS.length) {
+          executeProcedureStep(nextIndex);
+          return;
+        }
+
+        runConnectedSheetStep();
+      }
+
+      function runConnectedSheetStep() {
+        const stepNo = PROCEDURE_LABELS.length + 1;
+        setStatus('Creating Connected Sheet in 04_Output...');
+        log('> Step ' + stepNo + '/' + TOTAL_STEPS + ': Create Connected Sheet (lagerliste_komplett_final)', 'log-info');
+        setProgress((stepNo - 1) / TOTAL_STEPS + 0.05);
         isRunning = true;
 
         google.script.run
-          .withSuccessHandler(onStep2Completed)
+          .withSuccessHandler(onConnectedSheetCreated)
           .withFailureHandler(onFatalError)
-          .executeStoredProcedure(1);
+          .createLagerlisteConnectedSheet();
       }
 
-      function onStep2Completed(result) {
+      function onConnectedSheetCreated(result) {
         isRunning = false;
         if (isHalted) return finish(true, false);
 
-        log(result.log, result.success ? 'log-success' : 'log-error');
         if (!result.success) {
+          log(result.log, 'log-error');
           return finish(false, true);
         }
 
-        setStatus('RWA PQ complete. Starting Aktionsplan INT PQ...');
-        log('> Step 3/' + TOTAL_STEPS + ': sp_build_aktionsplan_int_pq', 'log-info');
-        setProgress(0.68);
-        isRunning = true;
-
-        google.script.run
-          .withSuccessHandler(onStep3Completed)
-          .withFailureHandler(onFatalError)
-          .executeStoredProcedure(2);
-      }
-
-      function onStep3Completed(result) {
-        isRunning = false;
-        if (isHalted) return finish(true, false);
-
-        log(result.log, result.success ? 'log-success' : 'log-error');
-
-        if (!result.success) {
-          return finish(false, true);
-        }
-
+        log('[SUCCESS] lagerliste_komplett_final saved in ' + (result.outputFolderName || '04_Outputs') + '.', 'log-success');
         setProgress(1.0);
         finish(false, false);
       }
@@ -174,6 +250,7 @@
 
       function stopPipeline() {
         isHalted = true;
+        stopPollingCurrentProcedure();
         document.getElementById('stop-btn').disabled = true;
         document.getElementById('stop-btn').innerText = 'Stopping...';
         log('> ABORT SIGNAL RECEIVED — waiting for current procedure call to return...', 'log-warn');
@@ -217,6 +294,7 @@
       }
 
       function onFatalError(err) {
+        stopPollingCurrentProcedure();
         stopTimer();
         document.getElementById('stop-btn').disabled = true;
         log('> FATAL ERROR: ' + err.message, 'log-error');

@@ -3,6 +3,7 @@
 // ============================================================================
 const EQ_PROJECT_ID = 'sit-ldl-int-oi-a-lvzt-run-818b';
 const EQ_DATASET_ID = 'staging';
+const EQ_OUTPUT_TABLE_ID = 'lagerliste_komplett_final';
 
 // Stored procedures to execute in order
 const EQ_PROCEDURES = [
@@ -19,9 +20,21 @@ const EQ_PROCEDURES = [
   {
     name: 'sp_build_aktionsplan_int_pq',
     label: 'Aktionsplan INT PQ',
-    call: `CALL \`${EQ_PROJECT_ID}.${EQ_DATASET_ID}.sp_aktionsplan_int_pq\`()`
+    call: `CALL \`${EQ_PROJECT_ID}.${EQ_DATASET_ID}.sp_build_aktionsplan_int_pq\`()`
+  },
+  {
+    name: 'sp_generate_lagerliste_komplett_final',
+    label: 'Generate Lagerliste Komplett Final',
+    call: `CALL \`${EQ_PROJECT_ID}.${EQ_DATASET_ID}.sp_generate_lagerliste_komplett_final\`()`
   }
 ];
+
+const EQ_FOLDER_CELL_MAP = {
+  uploads: 'B2',
+  ready: 'B3',
+  archive: 'B4',
+  output: 'B5'
+};
 
 // ============================================================================
 // UI TRIGGER
@@ -29,9 +42,71 @@ const EQ_PROCEDURES = [
 function openExecuteQueriesUI() {
   const html = HtmlService.createHtmlOutputFromFile('ExecuteQueriesUI')
     .setWidth(700)
-    .setHeight(560)
+    .setHeight(620)
     .setTitle('Execute Stored Procedures');
   SpreadsheetApp.getUi().showModalDialog(html, 'Execute Stored Procedures');
+}
+
+// ============================================================================
+// FOLDER CONFIG FROM FIRST SHEET (B2:B5)
+// ============================================================================
+function getPipelineFolderConfig() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const firstSheet = ss.getSheets()[0];
+  if (!firstSheet) {
+    throw new Error('No sheets found in the active spreadsheet.');
+  }
+
+  const cfg = {
+    uploads: resolveFolderFromCell_(firstSheet.getRange(EQ_FOLDER_CELL_MAP.uploads).getValue(), '01_Uploads'),
+    ready: resolveFolderFromCell_(firstSheet.getRange(EQ_FOLDER_CELL_MAP.ready).getValue(), '02_Ready'),
+    archive: resolveFolderFromCell_(firstSheet.getRange(EQ_FOLDER_CELL_MAP.archive).getValue(), '03_Archive'),
+    output: resolveFolderFromCell_(firstSheet.getRange(EQ_FOLDER_CELL_MAP.output).getValue(), '04_Output')
+  };
+
+  return {
+    uploads: { id: cfg.uploads.getId(), name: cfg.uploads.getName() },
+    ready: { id: cfg.ready.getId(), name: cfg.ready.getName() },
+    archive: { id: cfg.archive.getId(), name: cfg.archive.getName() },
+    output: { id: cfg.output.getId(), name: cfg.output.getName() }
+  };
+}
+
+function resolveFolderFromCell_(rawValue, label) {
+  const value = String(rawValue || '').trim();
+  if (!value) {
+    throw new Error(`Missing folder value for ${label}. Please fill ${label} in the first sheet.`);
+  }
+
+  const idFromUrl = extractDriveFolderId_(value);
+  if (idFromUrl) {
+    return DriveApp.getFolderById(idFromUrl);
+  }
+
+  if (/^[A-Za-z0-9_-]{20,}$/.test(value)) {
+    return DriveApp.getFolderById(value);
+  }
+
+  const byName = DriveApp.getFoldersByName(value);
+  if (byName.hasNext()) {
+    return byName.next();
+  }
+
+  throw new Error(`Could not resolve folder for ${label} from value: ${value}`);
+}
+
+function extractDriveFolderId_(value) {
+  const byUrl = value.match(/\/folders\/([a-zA-Z0-9_-]+)/);
+  if (byUrl && byUrl[1]) {
+    return byUrl[1];
+  }
+
+  const byResourceKey = value.match(/id=([a-zA-Z0-9_-]+)/);
+  if (byResourceKey && byResourceKey[1]) {
+    return byResourceKey[1];
+  }
+
+  return null;
 }
 
 // ============================================================================
@@ -89,6 +164,157 @@ function executeStoredProcedure(index) {
       log: `[CRITICAL] ${proc.label} failed: ${e.message}`
     };
   }
+}
+
+// ============================================================================
+// START + POLL API FOR REAL-TIME UI
+// ============================================================================
+function startStoredProcedure(index) {
+  const proc = EQ_PROCEDURES[index];
+  if (!proc) {
+    return { success: false, log: `[ERROR] Invalid procedure index: ${index}` };
+  }
+
+  const MAX_START_ATTEMPTS = 4;
+  let lastErr;
+
+  for (let attempt = 1; attempt <= MAX_START_ATTEMPTS; attempt++) {
+    try {
+      console.log(`[EQ] Starting ${proc.label} (attempt ${attempt})...`);
+
+      const job = BigQuery.Jobs.insert(
+        { configuration: { query: { query: proc.call, useLegacySql: false } } },
+        EQ_PROJECT_ID
+      );
+
+      const jobId = job.jobReference.jobId;
+      const location = job.jobReference.location;
+      return {
+        success: true,
+        label: proc.label,
+        name: proc.name,
+        jobId,
+        location,
+        log: `[STARTED] ${proc.label} (${proc.name})`
+      };
+    } catch (e) {
+      lastErr = e;
+      console.warn(`[EQ] Start attempt ${attempt}/${MAX_START_ATTEMPTS} failed for ${proc.label}: ${e.message}`);
+      if (attempt < MAX_START_ATTEMPTS) {
+        Utilities.sleep(2000 * attempt);
+      }
+    }
+  }
+
+  return {
+    success: false,
+    log: `[CRITICAL] Failed to start ${proc.label} after ${MAX_START_ATTEMPTS} attempts: ${lastErr.message}`
+  };
+}
+
+function pollStoredProcedure(index, jobId, location) {
+  const proc = EQ_PROCEDURES[index];
+  if (!proc) {
+    return { success: false, done: true, log: `[ERROR] Invalid procedure index: ${index}` };
+  }
+
+  if (!jobId || !location) {
+    return { success: false, done: true, log: `[ERROR] Missing job metadata for ${proc.label}.` };
+  }
+
+  try {
+    const st = BigQuery.Jobs.get(EQ_PROJECT_ID, jobId, { location });
+    const state = st.status && st.status.state ? st.status.state : 'UNKNOWN';
+
+    if (state !== 'DONE') {
+      return {
+        success: true,
+        done: false,
+        state,
+        log: `[RUNNING] ${proc.label}: state=${state}`
+      };
+    }
+
+    if (st.status.errorResult) {
+      const errMsg = st.status.errorResult.message || JSON.stringify(st.status.errorResult);
+      return {
+        success: false,
+        done: true,
+        state,
+        log: `[ERROR] ${proc.label} failed: ${errMsg}`
+      };
+    }
+
+    return {
+      success: true,
+      done: true,
+      state,
+      log: `[SUCCESS] ${proc.label} (${proc.name}) executed successfully.`
+    };
+  } catch (e) {
+    // Some polling calls can fail transiently (e.g. temporary empty responses).
+    // Keep polling instead of failing the whole pipeline.
+    return {
+      success: true,
+      done: false,
+      state: 'RUNNING',
+      transient: true,
+      log: `[WARN] Poll retry for ${proc.label}: ${e.message}`
+    };
+  }
+}
+
+// ============================================================================
+// CONNECTED SHEET GENERATION IN 04_OUTPUT
+// ============================================================================
+function createLagerlisteConnectedSheet() {
+  try {
+    const folderCfg = getPipelineFolderConfig();
+    const outputFolder = DriveApp.getFolderById(folderCfg.output.id);
+
+    const now = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyyMMdd_HHmmss');
+    const fileName = `lagerliste_komplett_final_${now}`;
+
+    const ss = SpreadsheetApp.create(fileName);
+    SpreadsheetApp.enableBigQueryExecution();
+
+    const spec = SpreadsheetApp.newDataSourceSpec()
+      .asBigQuery()
+      .setProjectId(EQ_PROJECT_ID)
+      .setTableProjectId(EQ_PROJECT_ID)
+      .setDatasetId(EQ_DATASET_ID)
+      .setTableId(EQ_OUTPUT_TABLE_ID)
+      .build();
+
+    const dataSourceSheet = ss.insertDataSourceSheet(spec);
+    dataSourceSheet.refreshData();
+
+    const file = DriveApp.getFileById(ss.getId());
+    outputFolder.addFile(file);
+    DriveApp.getRootFolder().removeFile(file);
+
+    return {
+      success: true,
+      spreadsheetId: ss.getId(),
+      spreadsheetUrl: ss.getUrl(),
+      outputFolderName: folderCfg.output.name,
+      log: `[SUCCESS] lagerliste_komplett_final saved in ${folderCfg.output.name}.`
+    };
+  } catch (e) {
+    return {
+      success: false,
+      log: `[ERROR] Failed to create Connected Sheet: ${e.message}`
+    };
+  }
+}
+
+function getExecuteQueriesConfig() {
+  const folderCfg = getPipelineFolderConfig();
+  return {
+    totalProcedures: EQ_PROCEDURES.length,
+    procedureLabels: EQ_PROCEDURES.map(function (p) { return p.label; }),
+    outputFolderName: folderCfg.output.name
+  };
 }
 
 // ============================================================================

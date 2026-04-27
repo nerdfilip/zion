@@ -23,6 +23,23 @@ const HEAVY_EXCEL_FILES = [
   "rwa", "ospl_artikelliste", "übersicht überschneiderartikel"
 ];
 
+function getFolderConfigForConverter_() {
+  if (typeof getPipelineFolderConfig === 'function') {
+    try {
+      return getPipelineFolderConfig();
+    } catch (e) {
+      console.warn('[CONVERTER] Falling back to hardcoded folder IDs: ' + e.message);
+    }
+  }
+
+  return {
+    uploads: { id: UPLOADS_FOLDER_ID, name: '01_Uploads' },
+    ready: { id: READY_FOLDER_ID, name: '02_Ready' },
+    archive: { id: '', name: '03_Archive' },
+    output: { id: '', name: '04_Output' }
+  };
+}
+
 // ============================================================================
 // 1. MENU & UI TRIGGER
 // ============================================================================
@@ -42,8 +59,7 @@ function onOpen() {
 
   addIfAvailable('Convert Files (CSV)', 'openProgressUI');
   addIfAvailable('Import Ready Files to BigQuery', 'openBQProgressUI');
-  addIfAvailable('Execute transformations (Lagerliste)', 'openTransformUI');
-  addIfAvailable('Execute Stored Procedures', 'openExecuteQueriesUI');
+  addIfAvailable('Execute Transformations', 'openExecuteQueriesUI');
 
   menu.addToUi();
 }
@@ -60,7 +76,8 @@ function openProgressUI() {
 // 2. FETCH FILES
 // ============================================================================
 function getPendingFiles() {
-  const folder = DriveApp.getFolderById(UPLOADS_FOLDER_ID);
+  const folderCfg = getFolderConfigForConverter_();
+  const folder = DriveApp.getFolderById(folderCfg.uploads.id);
   const files = folder.getFiles();
   let fileList = [];
   while (files.hasNext()) {
@@ -74,7 +91,8 @@ function getPendingFiles() {
 // 3. PROCESS A SINGLE FILE
 // ============================================================================
 function processSingleFile(fileObj) {
-  const readyFolder = DriveApp.getFolderById(READY_FOLDER_ID);
+  const folderCfg = getFolderConfigForConverter_();
+  const readyFolder = DriveApp.getFolderById(folderCfg.ready.id);
   const file = DriveApp.getFileById(fileObj.id);
   const lowerName = fileObj.name.toLowerCase();
   const fileSize = Number(file.getSize() || 0);
@@ -113,7 +131,7 @@ function processSingleFile(fileObj) {
         } catch (heavyError) {
           systemLog(`[SERVER] SheetJS fallback triggered: ${heavyError.message}`);
           // Fallback to native Google Drive conversion only if SheetJS fails
-          return convertViaDrivePath_(file, fileObj, csvName, readyFolder, UPLOADS_FOLDER_ID, systemLog, serverTrace, { forceRwaDecimalStrings: isRwaFile });
+          return convertViaDrivePath_(file, fileObj, csvName, readyFolder, folderCfg.uploads.id, systemLog, serverTrace, { forceRwaDecimalStrings: isRwaFile });
         }
       }
 
@@ -138,7 +156,7 @@ function processSingleFile(fileObj) {
         }
 
         // Final fallback for large files using Google Drive streaming
-        return convertViaDrivePath_(file, fileObj, csvName, readyFolder, UPLOADS_FOLDER_ID, systemLog, serverTrace, {
+        return convertViaDrivePath_(file, fileObj, csvName, readyFolder, folderCfg.uploads.id, systemLog, serverTrace, {
           forceRwaDecimalStrings: isRwaFile, resumable: true, skipBlobFallback: fileSize > LARGE_FILE_STAGE_THRESHOLD_BYTES
         });
       }
@@ -711,6 +729,9 @@ function formatNumberAtLeast5Decimals_(num) {
 
 // Wraps CSV text nodes in quotation marks if they contain commas or line breaks
 function escapeCsvValue_(value) {
-  const text = String(value == null ? '' : value);
-  return /[",\n\r]/.test(text) ? '"' + text.replace(/"/g, '""') + '"' : text;
+  // Replace internal newlines with a space to prevent BigQuery row/column shifting.
+  // Cells with Alt+Enter in Excel would otherwise split into multiple CSV rows
+  // and shift all subsequent columns for that record.
+  const text = String(value == null ? '' : value).replace(/[\r\n]+/g, ' ').trim();
+  return /[",]/.test(text) ? '"' + text.replace(/"/g, '""') + '"' : text;
 }

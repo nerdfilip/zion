@@ -5,6 +5,23 @@ const GCP_PROJECT_ID    = 'sit-ldl-int-oi-a-lvzt-run-818b';
 const DATASET_ID        = 'imports_v4'; 
 const ARCHIVE_FOLDER_ID = '1IOrUiTS_xXb69EBUcb8rqPSbUhQKjugO';
 
+function getFolderConfigForBQLoader_() {
+  if (typeof getPipelineFolderConfig === 'function') {
+    try {
+      return getPipelineFolderConfig();
+    } catch (e) {
+      console.warn('[BQ] Falling back to hardcoded folder IDs: ' + e.message);
+    }
+  }
+
+  return {
+    uploads: { id: '', name: '01_Uploads' },
+    ready: { id: typeof READY_FOLDER_ID !== 'undefined' ? READY_FOLDER_ID : '', name: '02_Ready' },
+    archive: { id: ARCHIVE_FOLDER_ID, name: '03_Archive' },
+    output: { id: '', name: '04_Output' }
+  };
+}
+
 // List of tracked files to set row logic
 // IMPORTANT: Specific keywords MUST be placed before generic ones 
 // (e.g., "aktionsplan int_ltu" must be above "aktionsplan")
@@ -470,7 +487,8 @@ function cleanTableName(fileName) {
 // ============================================================================
 function getReadyFiles() {
   console.log("[INIT] Scanning '02_Ready' folder for files to import...");
-  const folder = DriveApp.getFolderById(READY_FOLDER_ID);
+  const folderCfg = getFolderConfigForBQLoader_();
+  const folder = DriveApp.getFolderById(folderCfg.ready.id);
   const files = folder.getFiles();
   
   let fileMap = {};
@@ -571,7 +589,8 @@ function buildDynamicSchema(fileId, headerRow, dataRow, forcedDelimiter, project
 // MAIN PIPELINE: PROCESS SINGLE FILE WITH INDEXING AND ORDER BY
 // ============================================================================
 function processSingleBQFile(fileObj) {
-  const archiveFolder = DriveApp.getFolderById(ARCHIVE_FOLDER_ID);
+  const folderCfg = getFolderConfigForBQLoader_();
+  const archiveFolder = DriveApp.getFolderById(folderCfg.archive.id);
   const file = DriveApp.getFileById(fileObj.id);
   const lowerName = fileObj.name.toLowerCase();
   
