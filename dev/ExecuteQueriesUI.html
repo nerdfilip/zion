@@ -203,7 +203,7 @@
       function runConnectedSheetStep() {
         const stepNo = PROCEDURE_LABELS.length + 1;
         setStatus('Creating Connected Sheet in current spreadsheet...');
-        log('> Step ' + stepNo + '/' + TOTAL_STEPS + ': Create Connected Sheet (lagerliste_komplett_final)', 'log-info');
+        log('> Step ' + stepNo + '/' + TOTAL_STEPS + ': Create Connected Sheet (lagerliste_komplett)', 'log-info');
         setProgress((stepNo - 1) / TOTAL_STEPS + 0.05);
         isRunning = true;
 
@@ -222,7 +222,7 @@
           return finish(false, true);
         }
 
-        log('[SUCCESS] Connected Sheet created in current file: ' + (result.sheetName || 'lagerliste_komplett_final') + '.', 'log-success');
+        log('[SUCCESS] Connected Sheet created in current file: ' + (result.sheetName || 'lagerliste_komplett') + '.', 'log-success');
         setProgress(1.0);
         finish(false, false);
       }
@@ -237,7 +237,7 @@
           log('> PIPELINE HALTED BY USER.', 'log-warn');
           setProgressStyle('#fab387');
         } else if (hasError) {
-          setStatus('Completed with errors — review the log above.');
+          setStatus('Completed with errors — review the log belpw.');
           setProgressStyle('#f38ba8');
         } else {
           setStatus('Done! All stored procedures executed successfully.');

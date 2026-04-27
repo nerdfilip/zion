@@ -272,13 +272,14 @@ function createLagerlisteConnectedSheet() {
     const ss = SpreadsheetApp.getActiveSpreadsheet();
     SpreadsheetApp.enableBigQueryExecution();
     const removedCount = removeExistingLagerlisteConnectedSheets_(ss, EQ_OUTPUT_TABLE_ID);
+    const source = resolveConnectedSheetSource_();
 
     const spec = SpreadsheetApp.newDataSourceSpec()
       .asBigQuery()
       .setProjectId(EQ_PROJECT_ID)
       .setTableProjectId(EQ_PROJECT_ID)
-      .setDatasetId(EQ_DATASET_ID)
-      .setTableId(EQ_OUTPUT_TABLE_ID)
+      .setDatasetId(source.datasetId)
+      .setTableId(source.tableId)
       .build();
 
     const dataSourceSheet = ss.insertDataSourceSheet(spec);
@@ -295,6 +296,8 @@ function createLagerlisteConnectedSheet() {
       spreadsheetUrl: ss.getUrl(),
       sheetName,
       replacedSheets: removedCount,
+      sourceDatasetId: source.datasetId,
+      sourceTableId: source.tableId,
       log: `[SUCCESS] Connected Sheet recreated in current spreadsheet: ${sheetName}`
     };
   } catch (e) {
@@ -317,6 +320,17 @@ function removeExistingLagerlisteConnectedSheets_(spreadsheet, baseName) {
   });
 
   return toDelete.length;
+}
+
+function resolveConnectedSheetSource_() {
+  try {
+    BigQuery.Tables.get(EQ_PROJECT_ID, EQ_DATASET_ID, EQ_OUTPUT_TABLE_ID);
+    return { datasetId: EQ_DATASET_ID, tableId: EQ_OUTPUT_TABLE_ID };
+  } catch (e) {
+    throw new Error(
+      `Connected Sheet source not found: ${EQ_PROJECT_ID}.${EQ_DATASET_ID}.${EQ_OUTPUT_TABLE_ID}. ${e.message}`
+    );
+  }
 }
 
 function resolveSheetFromDataSource_(spreadsheet, dataSourceSheet) {
