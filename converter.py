@@ -1,13 +1,10 @@
 import sys
 import os
 import html
-from decimal import Decimal, InvalidOperation
+import csv
 import pandas as pd
-import pandavro as pdx
-import pyarrow as pa
-import pyarrow.parquet as pq
 from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
-                             QTextEdit, QPushButton, QFrame, QFileDialog, QComboBox)
+                             QTextEdit, QPushButton, QFrame, QFileDialog)
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer
 
 # ==========================================
@@ -28,14 +25,15 @@ class ConverterWorker(QThread):
         'ß': 'ss',
     }
 
-    def __init__(self, file_paths, output_dir, output_format, use_german_dict=False):
+    EXCEL_EXTENSIONS = ('.xls', '.xlsx', '.xlsm', '.xlsb', '.xltx', '.xltm', '.ods')
+    STREAMABLE_EXCEL_EXTENSIONS = ('.xlsx', '.xlsm', '.xltx', '.xltm')
+    LARGE_FILE_THRESHOLD = 300 * 1024 * 1024  # 300MB
+
+    def __init__(self, file_paths, output_dir, use_german_dict=False):
         super().__init__()
         self.file_paths = file_paths
-        self.output_dir = output_dir 
-        self.output_format = output_format 
+        self.output_dir = output_dir
         self.use_german_dict = use_german_dict
-        self.integer_headers = set()
-        self.bignumeric_headers = set()
 
     @classmethod
     def _replace_german_chars(cls, value):
@@ -66,195 +64,148 @@ class ConverterWorker(QThread):
             sanitized.append(candidate)
         return sanitized
 
-    @staticmethod
-    def _to_decimal(value):
-        if value is None or pd.isna(value):
-            return None
-        if isinstance(value, Decimal):
-            return value
-        text = str(value).strip().replace(',', '')
-        if not text:
-            return None
-        try:
-            return Decimal(text)
-        except (InvalidOperation, ValueError):
-            return None
-
-    @staticmethod
-    def _decimal_profile(value):
-        as_decimal = ConverterWorker._to_decimal(value)
-        if as_decimal is None:
-            return None
-
-        normalized = as_decimal.normalize()
-        digits = normalized.as_tuple().digits
-        exponent = normalized.as_tuple().exponent
-        precision = len(digits)
-        scale = -exponent if exponent < 0 else 0
-        return as_decimal, precision, scale
-
-    def _infer_numeric_targets(self, df):
-        inferred_integer = set()
-        inferred_bignumeric = set()
-
-        for col in df.columns:
-            col_name = str(col)
-            series = df[col]
-            if isinstance(series, pd.DataFrame):
-                self.update_status.emit(f"Warning: Duplicate header detected for '{col_name}', skipping numeric inference")
-                continue
-
-            non_null = series.dropna()
-            if non_null.empty:
-                continue
-
-            profiles = []
-            parseable_count = 0
-            for raw in non_null:
-                profile = self._decimal_profile(raw)
-                if profile is None:
-                    continue
-                parseable_count += 1
-                profiles.append(profile)
-
-            coverage = parseable_count / len(non_null)
-            if coverage < 0.95 or not profiles:
-                continue
-
-            max_precision = max(p[1] for p in profiles)
-            max_scale = max(p[2] for p in profiles)
-
-            if max_scale == 0 and max_precision <= 38:
-                inferred_integer.add(col_name)
-            elif max_precision <= 76 and max_scale <= 38:
-                inferred_bignumeric.add(col_name)
-            else:
-                self.update_status.emit(
-                    f"Warning: Header '{col_name}' exceeds BIGNUMERIC limits (precision={max_precision}, scale={max_scale})"
-                )
-
-        self.integer_headers = inferred_integer
-        self.bignumeric_headers = inferred_bignumeric
-
-    def _apply_decimal_columns(self, df):
-        for col in sorted(self.integer_headers, key=str):
-            df[col] = pd.to_numeric(df[col], errors='coerce').astype('Int64')
-
-        for col in sorted(self.bignumeric_headers, key=str):
-            df[col] = df[col].apply(self._to_decimal)
-
     def _apply_german_dictionary_headers(self, columns):
         return [self._replace_german_chars(col) for col in columns]
+
+    @staticmethod
+    def _normalize_header_preserve_style(header, fallback_index):
+        if header is None:
+            return f"Column {fallback_index}"
+        text = str(header).strip()
+        if not text:
+            return f"Column {fallback_index}"
+        return text
+
+    @classmethod
+    def _deduplicate_headers_preserve_style(cls, columns):
+        seen = {}
+        deduplicated = []
+        for idx, col in enumerate(columns, start=1):
+            base = cls._normalize_header_preserve_style(col, idx)
+            count = seen.get(base, 0)
+            if count == 0:
+                candidate = base
+            else:
+                candidate = f"{base} ({count + 1})"
+            seen[base] = count + 1
+            deduplicated.append(candidate)
+        return deduplicated
 
     def _apply_german_dictionary_records(self, df):
         for col in df.select_dtypes(include=['object']).columns:
             df[col] = df[col].apply(
-                lambda v: self._replace_german_chars(v) if v is not None else None
+                lambda v: self._replace_german_chars(v) if isinstance(v, str) else v
             )
 
-    @staticmethod
-    def _normalize_nulls_for_parquet(df):
-        # Keep dtypes stable; null normalization is handled per column at write time.
-        return df.copy()
+    def _get_excel_engine(self, ext):
+        engine_map = {
+            '.xls': 'xlrd',
+            '.xlsx': 'openpyxl',
+            '.xlsm': 'openpyxl',
+            '.xltx': 'openpyxl',
+            '.xltm': 'openpyxl',
+            '.xlsb': 'pyxlsb',
+            '.ods': 'odf',
+        }
+        return engine_map.get(ext)
 
-    @staticmethod
-    def _to_nullable_list(series):
-        return [None if pd.isna(v) else v for v in series.tolist()]
+    def _transform_dataframe(self, df):
+        if self.use_german_dict:
+            # ON means transliterate only German characters and preserve everything else.
+            df.columns = [
+                self._replace_german_chars(col) if isinstance(col, str) else col
+                for col in df.columns
+            ]
+        else:
+            # OFF means keep headers and values unchanged.
+            return df
 
-    @staticmethod
-    def _normalize_nulls_for_avro(df):
-        # Keep stable pandas dtypes for avro inference while preserving null semantics.
-        avro_df = df.copy()
-        for col in avro_df.columns:
-            series = avro_df[col]
-            if series.isna().all():
-                avro_df[col] = pd.Series([None] * len(avro_df), dtype='string')
-            elif pd.api.types.is_integer_dtype(series):
-                avro_df[col] = series.astype('Int64')
-            elif pd.api.types.is_float_dtype(series):
-                avro_df[col] = series.astype('Float64')
-            elif pd.api.types.is_bool_dtype(series):
-                avro_df[col] = series.astype('boolean')
+        if self.use_german_dict:
+            self._apply_german_dictionary_records(df)
+
+        return df
+
+    def _convert_excel_streaming(self, file_path, out_path):
+        try:
+            from openpyxl import load_workbook
+        except ImportError as exc:
+            raise RuntimeError(
+                "openpyxl is required for streaming large .xlsx/.xlsm files. Install with: pip install openpyxl"
+            ) from exc
+
+        workbook = load_workbook(file_path, read_only=True, data_only=True)
+        try:
+            worksheet = workbook.worksheets[0]
+            rows = worksheet.iter_rows(values_only=True)
+
+            first_row = next(rows, None)
+            if first_row is None:
+                with open(out_path, 'w', newline='', encoding='utf-8-sig') as csv_file:
+                    csv_file.write('')
+                return
+
+            if self.use_german_dict:
+                headers = [
+                    self._replace_german_chars(value) if isinstance(value, str) else ("" if value is None else value)
+                    for value in first_row
+                ]
             else:
-                avro_df[col] = series.astype('string')
-        return avro_df
+                # OFF means preserve headers exactly as they are in Excel.
+                headers = ["" if value is None else value for value in first_row]
 
-    def _write_parquet(self, out_path, df):
-        arrays = []
-        for col in df.columns:
-            series = df[col]
-            values = self._to_nullable_list(series)
+            with open(out_path, 'w', newline='', encoding='utf-8-sig') as csv_file:
+                writer = csv.writer(csv_file)
+                writer.writerow(headers)
 
-            if col in self.bignumeric_headers:
-                decimal_values = [self._to_decimal(v) for v in values]
-                arrays.append(pa.array(decimal_values, type=pa.decimal256(76, 38)))
-            elif col in self.integer_headers or pd.api.types.is_integer_dtype(series):
-                arrays.append(pa.array(values, type=pa.int64()))
-            elif pd.api.types.is_float_dtype(series):
-                # Export float-like numeric columns as exact decimals for BigQuery compatibility.
-                decimal_values = [self._to_decimal(v) for v in values]
-                arrays.append(pa.array(decimal_values, type=pa.decimal256(76, 38)))
-            else:
-                arrays.append(pa.array(values))
+                for row in rows:
+                    values = []
+                    for cell_value in row:
+                        if cell_value is None:
+                            values.append('')
+                        elif self.use_german_dict and isinstance(cell_value, str):
+                            values.append(self._replace_german_chars(cell_value))
+                        else:
+                            values.append(cell_value)
+                    writer.writerow(values)
+        finally:
+            workbook.close()
 
-        table = pa.Table.from_arrays(arrays, names=df.columns.tolist())
-        pq.write_table(table, out_path)
+    def _convert_excel_file(self, file_path, out_path):
+        ext = os.path.splitext(file_path)[1].lower()
+        file_size = os.path.getsize(file_path)
+
+        if file_size > self.LARGE_FILE_THRESHOLD and ext in self.STREAMABLE_EXCEL_EXTENSIONS:
+            self.update_status.emit(
+                f"Warning: Large Excel file detected ({file_size / (1024 * 1024):.1f}MB). Using streaming conversion."
+            )
+            self._convert_excel_streaming(file_path, out_path)
+            return
+
+        if file_size > self.LARGE_FILE_THRESHOLD:
+            self.update_status.emit(
+                "Warning: Large Excel file detected, using pandas fallback (higher memory usage expected)."
+            )
+
+        engine = self._get_excel_engine(ext)
+        df = pd.read_excel(file_path, engine=engine)
+        transformed_df = self._transform_dataframe(df)
+        transformed_df.to_csv(out_path, index=False, encoding='utf-8-sig')
 
     def run(self):
         for file in self.file_paths:
             try:
                 self.update_status.emit(f"Processing: {os.path.basename(file)}...")
-                
-                # Read the input file based on its extension
+
                 ext = os.path.splitext(file)[1].lower()
-                if ext == '.csv':
-                    df = pd.read_csv(file)
-                elif ext in ['.xls', '.xlsx']:
-                    df = pd.read_excel(file)
+                base_name = os.path.splitext(os.path.basename(file))[0]
+                out_path = os.path.join(self.output_dir, base_name + '.csv')
+
+                if ext in self.EXCEL_EXTENSIONS:
+                    self._convert_excel_file(file, out_path)
                 else:
-                    self.update_status.emit(f"Skipped {os.path.basename(file)} (Unsupported format)")
+                    self.update_status.emit(f"Skipped {os.path.basename(file)} (Only Excel formats are supported)")
                     continue
 
-                # Replace every NaN / NaT / NA with None so empty cells are always null.
-                df = df.where(df.notna(), None)
-                
-                # Normalize headers to lowercase and valid identifier format.
-                df.columns = self._sanitize_headers(df.columns)
-
-                if self.use_german_dict:
-                    df.columns = self._apply_german_dictionary_headers(df.columns)
-
-                # Re-sanitize after transliteration in case collisions are introduced.
-                df.columns = self._sanitize_headers(df.columns)
-
-                # Keep column names as strings to avoid mixed-type sort/comparison errors.
-                df.columns = [str(col) for col in df.columns]
-
-                if self.use_german_dict:
-                    self._apply_german_dictionary_records(df)
-
-                # Extract the base file name without the extension
-                base_name = os.path.splitext(os.path.basename(file))[0]
-                
-                # Construct the new file path based on the selected format
-                out_path = os.path.join(self.output_dir, base_name + self.output_format)
-                
-                # Convert and save dataframe to the requested format
-                if self.output_format == '.avro':
-                    avro_df = self._normalize_nulls_for_avro(df)
-                    pdx.to_avro(out_path, avro_df)
-                elif self.output_format == '.parquet':
-                    # Detect numeric targets only for parquet typing.
-                    self._infer_numeric_targets(df)
-                    self.update_status.emit(
-                        f"Auto-detected BIGNUMERIC headers: {', '.join(sorted(self.bignumeric_headers, key=str)) or 'none'}"
-                    )
-
-                    # Enforce integer/decimal parquet output for BigQuery compatibility.
-                    typed_df = self._normalize_nulls_for_parquet(df)
-                    self._apply_decimal_columns(typed_df)
-                    self._write_parquet(out_path, typed_df)
-                
                 self.update_status.emit(f"Success: Saved {os.path.basename(out_path)}")
             except Exception as e:
                 self.update_status.emit(f"Error at {os.path.basename(file)}: {str(e)}")
@@ -274,7 +225,7 @@ class DataConverterApp(QWidget):
         self.initUI()
 
     def initUI(self):
-        self.setWindowTitle('Universal Data Converter (Excel/CSV to AVRO/Parquet)')
+        self.setWindowTitle('Excel to CSV Converter')
         self.resize(920, 700)
         self.setAcceptDrops(True)
 
@@ -344,14 +295,14 @@ class DataConverterApp(QWidget):
 
         title = QLabel("Universal Data Converter")
         title.setObjectName("title")
-        subtitle = QLabel("Convert Excel and CSV files to AVRO and Parquet files")
+        subtitle = QLabel("Convert Excel files of all common types to CSV output")
         subtitle.setObjectName("subtitle")
         hero_layout.addWidget(title)
         hero_layout.addWidget(subtitle)
         layout.addWidget(hero_card)
 
         # Drag & Drop Zone
-        self.drop_zone = QLabel("\nDrop Excel or CSV files here\n")
+        self.drop_zone = QLabel("\nDrop Excel files here\n")
         self.drop_zone.setAlignment(Qt.AlignCenter)
         self.drop_zone.setStyleSheet("""
             QLabel {
@@ -384,17 +335,8 @@ class DataConverterApp(QWidget):
         self.folder_label = QLabel("Save to: Not selected")
         self.folder_label.setStyleSheet("font-size: 13px; color: #334e68;")
         
-        # Format Dropdown
-        self.format_label = QLabel("Target Format:")
-        self.format_label.setStyleSheet("font-size: 13px; font-weight: bold;")
-        self.format_combo = QComboBox()
-        self.format_combo.addItems([".avro", ".parquet"])
-        self.format_combo.setStyleSheet("font-size: 13px;")
-
         top_settings_row.addWidget(self.folder_btn)
         top_settings_row.addWidget(self.folder_label, stretch=1)
-        top_settings_row.addWidget(self.format_label)
-        top_settings_row.addWidget(self.format_combo)
         settings_layout.addLayout(top_settings_row)
 
         dict_row = QHBoxLayout()
@@ -405,9 +347,13 @@ class DataConverterApp(QWidget):
         dict_row.addStretch(1)
         settings_layout.addLayout(dict_row)
 
-        autodetect_hint = QLabel("Supported: Excel/CSV input and AVRO/Parquet output.")
+        autodetect_hint = QLabel("Supported: .xls, .xlsx, .xlsm, .xlsb, .xltx, .xltm, .ods -> .csv")
         autodetect_hint.setStyleSheet("font-size: 12px; color: #486581;")
         settings_layout.addWidget(autodetect_hint)
+
+        large_file_hint = QLabel("Large Excel files over 300MB use a streaming mode when possible.")
+        large_file_hint.setStyleSheet("font-size: 12px; color: #486581;")
+        settings_layout.addWidget(large_file_hint)
 
         layout.addWidget(settings_card)
 
@@ -465,13 +411,18 @@ class DataConverterApp(QWidget):
         """)
         for url in event.mimeData().urls():
             file_path = url.toLocalFile()
-            if file_path.lower().endswith(('.xls', '.xlsx', '.csv')) and file_path not in self.file_list:
+            if file_path.lower().endswith(ConverterWorker.EXCEL_EXTENSIONS) and file_path not in self.file_list:
                 self.file_list.append(file_path)
         self.check_ready_state()
 
     # --- File & Folder Selection ---
     def browse_files(self):
-        files, _ = QFileDialog.getOpenFileNames(self, "Select Files", "", "Data Files (*.xls *.xlsx *.csv);;All Files (*)")
+        files, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Select Files",
+            "",
+            "Excel Files (*.xls *.xlsx *.xlsm *.xlsb *.xltx *.xltm *.ods);;All Files (*)"
+        )
         if files:
             for file in files:
                 if file not in self.file_list:
@@ -528,15 +479,13 @@ class DataConverterApp(QWidget):
         self.start_btn.setEnabled(False)
         self.browse_btn.setEnabled(False)
         self.folder_btn.setEnabled(False)
-        self.format_combo.setEnabled(False)
-        
-        selected_format = self.format_combo.currentText()
+
         german_enabled = self.german_dict_btn.isChecked()
-        
+
         self.time_elapsed = 0
         self.timer_label.setText("Time elapsed: 00:00")
         self.append_status("-" * 40)
-        self.append_status(f"Starting conversion to {selected_format.upper()} format")
+        self.append_status("Starting conversion to CSV format")
         self.append_status(f"Output directory: {self.output_dir}")
         if german_enabled:
             self.append_status("German dictionary: enabled (headers and records)")
@@ -548,7 +497,6 @@ class DataConverterApp(QWidget):
         self.worker = ConverterWorker(
             self.file_list,
             self.output_dir,
-            selected_format,
             german_enabled
         )
         self.worker.update_status.connect(self.log_status)
@@ -574,7 +522,6 @@ class DataConverterApp(QWidget):
         self.file_list = [] 
         self.browse_btn.setEnabled(True)
         self.folder_btn.setEnabled(True)
-        self.format_combo.setEnabled(True)
         self.check_ready_state()
 
 # ==========================================

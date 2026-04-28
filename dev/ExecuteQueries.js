@@ -5,6 +5,20 @@ const EQ_PROJECT_ID = 'sit-ldl-int-oi-a-lvzt-run-818b';
 const EQ_DATASET_ID = 'staging';
 const EQ_OUTPUT_TABLE_ID = 'lagerliste_komplett';
 const EQ_OUTPUT_SHEET_NAME = 'Lagerliste Komplett';
+const EQ_V3_SPREADSHEET_NAME = 'Lagerliste_V3';
+const EQ_COUNTRY_CONNECTED_SHEETS = [
+  { country: 'AT', tableId: 'Lagerliste_AT' },
+  { country: 'BE', tableId: 'Lagerliste_BE' },
+  { country: 'CZ', tableId: 'Lagerliste_CZ' },
+  { country: 'DE', tableId: 'Lagerliste_DE' },
+  { country: 'ES', tableId: 'Lagerliste_ES' },
+  { country: 'FR', tableId: 'Lagerliste_FR' },
+  { country: 'INT', tableId: 'Lagerliste_INT' },
+  { country: 'NL', tableId: 'Lagerliste_NL' },
+  { country: 'PL', tableId: 'Lagerliste_PL' },
+  { country: 'SK', tableId: 'Lagerliste_SK' }
+];
+const EQ_CONNECTED_SHEET_MAX_ATTEMPTS = 4;
 
 // Stored procedures to execute in order
 const EQ_PROCEDURES = [
@@ -27,6 +41,11 @@ const EQ_PROCEDURES = [
     name: 'sp_lagerliste_komplett',
     label: 'Lagerliste Komplett',
     call: `CALL \`${EQ_PROJECT_ID}.${EQ_DATASET_ID}.sp_lagerliste_komplett\`()`
+  },
+  {
+    name: 'sp_lagerliste_v3',
+    label: 'Lagerliste V3',
+    call: `CALL \`${EQ_PROJECT_ID}.${EQ_DATASET_ID}.sp_lagerliste_v3\`()`
   }
 ];
 
@@ -375,7 +394,11 @@ function findCreatedConnectedSheet_(spreadsheet) {
 function getExecuteQueriesConfig() {
   return {
     totalProcedures: EQ_PROCEDURES.length,
-    procedureLabels: EQ_PROCEDURES.map(function (p) { return p.label; })
+    procedureLabels: EQ_PROCEDURES.map(function (p) { return p.label; }),
+    procedureNames: EQ_PROCEDURES.map(function (p) { return p.name; }),
+    includeLegacyConnectedSheetStep: true,
+    connectedSheetCountries: EQ_COUNTRY_CONNECTED_SHEETS.map(function (entry) { return entry.country; }),
+    connectedSheetTableIds: EQ_COUNTRY_CONNECTED_SHEETS.map(function (entry) { return entry.tableId; })
   };
 }
 
@@ -384,4 +407,304 @@ function getExecuteQueriesConfig() {
 // ============================================================================
 function getStoredProcedureCount() {
   return EQ_PROCEDURES.length;
+}
+
+// ============================================================================
+// CONNECTED SHEETS V3 GENERATION (NEW SPREADSHEET + REAL-TIME POLLING)
+// ============================================================================
+function resolveOutputFolder_() {
+  const firstSheet = SpreadsheetApp.getActiveSpreadsheet().getSheets()[0];
+  if (!firstSheet) {
+    throw new Error('Cannot read folder config: no sheets found.');
+  }
+
+  const raw = firstSheet.getRange(EQ_FOLDER_CELL_MAP.output).getValue();
+  return resolveFolderFromCell_(raw, '04_Output');
+}
+
+function deleteExistingLagerlisteV3_(outputFolder) {
+  const files = outputFolder.getFilesByName(EQ_V3_SPREADSHEET_NAME);
+  let deletedCount = 0;
+
+  while (files.hasNext()) {
+    const file = files.next();
+    file.setTrashed(true);
+    deletedCount += 1;
+  }
+
+  return deletedCount;
+}
+
+function moveFileToFolder_(fileId, targetFolder) {
+  const file = DriveApp.getFileById(fileId);
+
+  // Remove from all current parent folders, add to target.
+  const parents = file.getParents();
+  while (parents.hasNext()) {
+    parents.next().removeFile(file);
+  }
+
+  targetFolder.addFile(file);
+}
+
+function startCreateLagerlisteV3ConnectedSheets() {
+  try {
+    SpreadsheetApp.enableBigQueryExecution();
+
+    const outputFolder = resolveOutputFolder_();
+    const deletedCount = deleteExistingLagerlisteV3_(outputFolder);
+    console.log(`[EQ] Removed ${deletedCount} existing Lagerliste_V3 file(s) from output folder.`);
+
+    const ss = SpreadsheetApp.create(EQ_V3_SPREADSHEET_NAME);
+    moveFileToFolder_(ss.getId(), outputFolder);
+
+    const firstSheet = ss.getSheets()[0];
+    const operationId = Utilities.getUuid();
+
+    const state = {
+      operationId: operationId,
+      spreadsheetId: ss.getId(),
+      spreadsheetUrl: ss.getUrl(),
+      spreadsheetName: EQ_V3_SPREADSHEET_NAME,
+      defaultSheetId: firstSheet ? firstSheet.getSheetId() : null,
+      nextIndex: 0,
+      totalTables: EQ_COUNTRY_CONNECTED_SHEETS.length,
+      createdCountries: [],
+      tableAttempts: {}
+    };
+
+    saveConnectedSheetOperationState_(operationId, state);
+
+    return {
+      success: true,
+      operationId: operationId,
+      spreadsheetId: state.spreadsheetId,
+      spreadsheetUrl: state.spreadsheetUrl,
+      spreadsheetName: state.spreadsheetName,
+      totalTables: state.totalTables,
+      log: `[STARTED] Connected Sheets creation started in ${state.spreadsheetName}.`
+    };
+  } catch (e) {
+    return {
+      success: false,
+      done: true,
+      log: `[ERROR] Failed to start Connected Sheets generation: ${e.message}`
+    };
+  }
+}
+
+function pollCreateLagerlisteV3ConnectedSheets(operationId) {
+  if (!operationId) {
+    return { success: false, done: true, log: '[ERROR] Missing Connected Sheets operation ID.' };
+  }
+
+  // Each Apps Script execution context must explicitly enable BigQuery data execution.
+  SpreadsheetApp.enableBigQueryExecution();
+
+  const state = loadConnectedSheetOperationState_(operationId);
+  if (!state) {
+    return {
+      success: false,
+      done: true,
+      log: '[ERROR] Connected Sheets operation state not found or expired. Please restart the pipeline.'
+    };
+  }
+
+  try {
+    if (state.nextIndex >= state.totalTables) {
+      finalizeConnectedSheetSpreadsheet_(state);
+      clearConnectedSheetOperationState_(operationId);
+      return {
+        success: true,
+        done: true,
+        completedTables: state.totalTables,
+        totalTables: state.totalTables,
+        spreadsheetId: state.spreadsheetId,
+        spreadsheetUrl: state.spreadsheetUrl,
+        spreadsheetName: state.spreadsheetName,
+        createdCountries: state.createdCountries || [],
+        log: `[SUCCESS] Connected Sheets completed in ${state.spreadsheetName} (${state.totalTables}/${state.totalTables}).`
+      };
+    }
+
+    const entry = EQ_COUNTRY_CONNECTED_SHEETS[state.nextIndex];
+    state.tableAttempts = state.tableAttempts || {};
+    const currentAttempt = (state.tableAttempts[entry.tableId] || 0) + 1;
+    state.tableAttempts[entry.tableId] = currentAttempt;
+
+    const source = resolveConnectedSheetSourceByTable_(entry.tableId);
+    const ss = SpreadsheetApp.openById(state.spreadsheetId);
+
+    const existingSheet = ss.getSheetByName(entry.country);
+    if (existingSheet) {
+      state.nextIndex += 1;
+      state.createdCountries = state.createdCountries || [];
+      if (state.createdCountries.indexOf(entry.country) === -1) {
+        state.createdCountries.push(entry.country);
+      }
+      delete state.tableAttempts[entry.tableId];
+      saveConnectedSheetOperationState_(operationId, state);
+
+      return {
+        success: true,
+        done: false,
+        completedTables: state.nextIndex,
+        totalTables: state.totalTables,
+        currentCountry: entry.country,
+        currentTableId: entry.tableId,
+        spreadsheetId: state.spreadsheetId,
+        spreadsheetUrl: state.spreadsheetUrl,
+        spreadsheetName: state.spreadsheetName,
+        log: `[INFO] Connected Sheet ${entry.country} already exists; continuing (${state.nextIndex}/${state.totalTables}).`
+      };
+    }
+
+    const spec = SpreadsheetApp.newDataSourceSpec()
+      .asBigQuery()
+      .setProjectId(EQ_PROJECT_ID)
+      .setTableProjectId(EQ_PROJECT_ID)
+      .setDatasetId(source.datasetId)
+      .setTableId(source.tableId)
+      .build();
+
+    const dataSourceSheet = ss.insertDataSourceSheet(spec);
+    const createdSheet = resolveSheetFromDataSource_(ss, dataSourceSheet) || findCreatedConnectedSheet_(ss);
+    if (!createdSheet) {
+      throw new Error(`Could not resolve created sheet for ${entry.country}.`);
+    }
+
+    createdSheet.setName(entry.country);
+    dataSourceSheet.refreshData();
+
+    state.nextIndex += 1;
+    state.createdCountries = state.createdCountries || [];
+    state.createdCountries.push(entry.country);
+    delete state.tableAttempts[entry.tableId];
+    saveConnectedSheetOperationState_(operationId, state);
+
+    return {
+      success: true,
+      done: false,
+      completedTables: state.nextIndex,
+      totalTables: state.totalTables,
+      currentCountry: entry.country,
+      currentTableId: entry.tableId,
+      spreadsheetId: state.spreadsheetId,
+      spreadsheetUrl: state.spreadsheetUrl,
+      spreadsheetName: state.spreadsheetName,
+      log: `[SUCCESS] Connected Sheet ${entry.country} created from ${source.datasetId}.${source.tableId} (${state.nextIndex}/${state.totalTables}).`
+    };
+  } catch (e) {
+    const retryEntry = EQ_COUNTRY_CONNECTED_SHEETS[state.nextIndex];
+    const retryTableId = retryEntry ? retryEntry.tableId : null;
+    const retryAttempt = retryTableId && state.tableAttempts ? state.tableAttempts[retryTableId] : 1;
+
+    if (isTransientBigQueryError_(e) && retryAttempt < EQ_CONNECTED_SHEET_MAX_ATTEMPTS) {
+      saveConnectedSheetOperationState_(operationId, state);
+      return {
+        success: true,
+        done: false,
+        transient: true,
+        completedTables: state.nextIndex,
+        totalTables: state.totalTables,
+        log: `[WARN] Transient API issue for ${retryEntry ? retryEntry.country : 'current table'} (attempt ${retryAttempt}/${EQ_CONNECTED_SHEET_MAX_ATTEMPTS}): ${e.message}. Retrying...`
+      };
+    }
+
+    clearConnectedSheetOperationState_(operationId);
+    return {
+      success: false,
+      done: true,
+      log: `[ERROR] Connected Sheets creation failed: ${e.message}`
+    };
+  }
+}
+
+function finalizeConnectedSheetSpreadsheet_(state) {
+  if (!state || !state.spreadsheetId) {
+    return;
+  }
+
+  const ss = SpreadsheetApp.openById(state.spreadsheetId);
+  const sheets = ss.getSheets();
+  if (!sheets || sheets.length <= 1) {
+    return;
+  }
+
+  const toDelete = sheets.filter(function (sheet) {
+    return sheet.getSheetId() === state.defaultSheetId || sheet.getName() === 'Sheet1';
+  });
+
+  toDelete.forEach(function (sheet) {
+    try {
+      ss.deleteSheet(sheet);
+    } catch (e) {
+      console.warn(`[EQ] Could not delete sheet "${sheet.getName()}": ${e.message}`);
+    }
+  });
+}
+
+function resolveConnectedSheetSourceByTable_(tableId) {
+  let lastErr;
+
+  for (let attempt = 1; attempt <= EQ_CONNECTED_SHEET_MAX_ATTEMPTS; attempt++) {
+    try {
+      BigQuery.Tables.get(EQ_PROJECT_ID, EQ_DATASET_ID, tableId);
+      return { datasetId: EQ_DATASET_ID, tableId: tableId };
+    } catch (e) {
+      lastErr = e;
+      if (!isTransientBigQueryError_(e) || attempt === EQ_CONNECTED_SHEET_MAX_ATTEMPTS) {
+        break;
+      }
+      Utilities.sleep(1000 * attempt);
+    }
+  }
+
+  throw new Error(
+    `Connected Sheet source not found: ${EQ_PROJECT_ID}.${EQ_DATASET_ID}.${tableId}. ${lastErr.message}`
+  );
+}
+
+function isTransientBigQueryError_(err) {
+  const message = String((err && err.message) || err || '').toLowerCase();
+
+  return (
+    message.indexOf('empty response') !== -1 ||
+    message.indexOf('internal error') !== -1 ||
+    message.indexOf('backend error') !== -1 ||
+    message.indexOf('rate limit') !== -1 ||
+    message.indexOf('quota exceeded') !== -1 ||
+    message.indexOf('timed out') !== -1 ||
+    message.indexOf('deadline exceeded') !== -1 ||
+    message.indexOf('http 500') !== -1 ||
+    message.indexOf('http 503') !== -1
+  );
+}
+
+function connectedSheetStateKey_(operationId) {
+  return `EQ_CONNECTED_V3_${operationId}`;
+}
+
+function saveConnectedSheetOperationState_(operationId, state) {
+  PropertiesService.getUserProperties().setProperty(
+    connectedSheetStateKey_(operationId),
+    JSON.stringify(state)
+  );
+}
+
+function loadConnectedSheetOperationState_(operationId) {
+  const raw = PropertiesService.getUserProperties().getProperty(connectedSheetStateKey_(operationId));
+  if (!raw) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(raw);
+  } catch (e) {
+    return null;
+  }
+}
+
+function clearConnectedSheetOperationState_(operationId) {
+  PropertiesService.getUserProperties().deleteProperty(connectedSheetStateKey_(operationId));
 }

@@ -81,8 +81,12 @@
       let startTime, timerInterval;
       let TOTAL_STEPS = 0;
       let PROCEDURE_LABELS = [];
+      let PROCEDURE_NAMES = [];
+      let COUNTRY_SHEETS = [];
+      let INCLUDE_LEGACY_CONNECTED_SHEET_STEP = true;
       let pollTimer = null;
       let currentJob = null;
+      let connectedJob = null;
       let pollInFlight = false;
 
       window.onload = function () {
@@ -104,7 +108,10 @@
         if (isHalted) return finish(true, false);
 
         PROCEDURE_LABELS = config.procedureLabels || [];
-        TOTAL_STEPS = (config.totalProcedures || 0) + 1; // +1 for Connected Sheet step
+        PROCEDURE_NAMES = config.procedureNames || [];
+        COUNTRY_SHEETS = config.connectedSheetCountries || [];
+        INCLUDE_LEGACY_CONNECTED_SHEET_STEP = config.includeLegacyConnectedSheetStep !== false;
+        TOTAL_STEPS = (config.totalProcedures || 0) + COUNTRY_SHEETS.length + (INCLUDE_LEGACY_CONNECTED_SHEET_STEP ? 1 : 0);
         executeProcedureStep(0);
       }
 
@@ -190,30 +197,39 @@
         setProgress(completedSteps / TOTAL_STEPS);
 
         const nextIndex = currentJob.index + 1;
+        const completedProcName = PROCEDURE_NAMES[currentJob.index] || '';
         currentJob = null;
+
+        if (INCLUDE_LEGACY_CONNECTED_SHEET_STEP && completedProcName === 'sp_lagerliste_komplett') {
+          refreshLagerlisteKomplettConnectedSheet(nextIndex);
+          return;
+        }
 
         if (nextIndex < PROCEDURE_LABELS.length) {
           executeProcedureStep(nextIndex);
           return;
         }
 
-        runConnectedSheetStep();
+        startConnectedSheetsCreation();
       }
 
-      function runConnectedSheetStep() {
-        const stepNo = PROCEDURE_LABELS.length + 1;
-        setStatus('Creating Connected Sheet in current spreadsheet...');
-        log('> Step ' + stepNo + '/' + TOTAL_STEPS + ': Create Connected Sheet (lagerliste_komplett)', 'log-info');
-        setProgress((stepNo - 1) / TOTAL_STEPS + 0.05);
+      function refreshLagerlisteKomplettConnectedSheet(nextProcedureIndex) {
+        const completedSteps = nextProcedureIndex;
+        const stepNo = completedSteps + 1;
+        setStatus('Refreshing Connected Sheet: Lagerliste Komplett...');
+        log('> Step ' + stepNo + '/' + TOTAL_STEPS + ': Refresh Connected Sheet (Lagerliste Komplett)', 'log-info');
+        setProgress(completedSteps / TOTAL_STEPS + 0.02);
         isRunning = true;
 
         google.script.run
-          .withSuccessHandler(onConnectedSheetCreated)
+          .withSuccessHandler(function (result) {
+            onLagerlisteKomplettConnectedSheetRefreshed(result, nextProcedureIndex, stepNo);
+          })
           .withFailureHandler(onFatalError)
           .createLagerlisteConnectedSheet();
       }
 
-      function onConnectedSheetCreated(result) {
+      function onLagerlisteKomplettConnectedSheetRefreshed(result, nextProcedureIndex, stepNo) {
         isRunning = false;
         if (isHalted) return finish(true, false);
 
@@ -222,7 +238,98 @@
           return finish(false, true);
         }
 
-        log('[SUCCESS] Connected Sheet created in current file: ' + (result.sheetName || 'lagerliste_komplett') + '.', 'log-success');
+        log(result.log || '[SUCCESS] Connected Sheet refreshed: Lagerliste Komplett.', 'log-success');
+        setProgress(stepNo / TOTAL_STEPS);
+
+        if (nextProcedureIndex < PROCEDURE_LABELS.length) {
+          executeProcedureStep(nextProcedureIndex);
+          return;
+        }
+
+        startConnectedSheetsCreation();
+      }
+
+      function startConnectedSheetsCreation() {
+        const stepNo = PROCEDURE_LABELS.length + (INCLUDE_LEGACY_CONNECTED_SHEET_STEP ? 1 : 0) + 1;
+        setStatus('Creating Lagerliste_V3 Connected Sheets...');
+        log('> Step ' + stepNo + '/' + TOTAL_STEPS + ': Start Connected Sheets document (Lagerliste_V3)', 'log-info');
+        setProgress((stepNo - 1) / TOTAL_STEPS + 0.03);
+        isRunning = true;
+
+        google.script.run
+          .withSuccessHandler(onConnectedSheetsStarted)
+          .withFailureHandler(onFatalError)
+          .startCreateLagerlisteV3ConnectedSheets();
+      }
+
+      function onConnectedSheetsStarted(result) {
+        isRunning = false;
+        if (isHalted) return finish(true, false);
+
+        if (!result.success) {
+          log(result.log, 'log-error');
+          return finish(false, true);
+        }
+
+        connectedJob = {
+          operationId: result.operationId,
+          totalTables: result.totalTables || COUNTRY_SHEETS.length,
+          spreadsheetUrl: result.spreadsheetUrl || ''
+        };
+
+        log(result.log, 'log-info');
+        if (connectedJob.spreadsheetUrl) {
+          log('[INFO] Output spreadsheet: ' + connectedJob.spreadsheetUrl, 'log-info');
+        }
+
+        startConnectedSheetsPolling();
+      }
+
+      function startConnectedSheetsPolling() {
+        stopPollingCurrentProcedure();
+        pollInFlight = false;
+        pollTimer = setInterval(function () {
+          if (isHalted || !connectedJob || pollInFlight) return;
+
+          pollInFlight = true;
+          isRunning = true;
+          google.script.run
+            .withSuccessHandler(onConnectedSheetsPolled)
+            .withFailureHandler(function (err) {
+              pollInFlight = false;
+              onFatalError(err);
+            })
+            .pollCreateLagerlisteV3ConnectedSheets(connectedJob.operationId);
+        }, 2000);
+      }
+
+      function onConnectedSheetsPolled(result) {
+        pollInFlight = false;
+        isRunning = false;
+        if (isHalted) return finish(true, false);
+
+        if (!result.success && result.done) {
+          stopPollingCurrentProcedure();
+          log(result.log, 'log-error');
+          return finish(false, true);
+        }
+
+        if (!result.done) {
+          if (result.log) {
+            log(result.log, 'log-success');
+          }
+          setStatus('Creating Connected Sheets in Lagerliste_V3 (' + result.completedTables + '/' + result.totalTables + ')...');
+          setProgress((PROCEDURE_LABELS.length + (INCLUDE_LEGACY_CONNECTED_SHEET_STEP ? 1 : 0) + result.completedTables) / TOTAL_STEPS);
+          return;
+        }
+
+        stopPollingCurrentProcedure();
+        if (result.log) {
+          log(result.log, 'log-success');
+        }
+        if (result.spreadsheetUrl) {
+          log('[SUCCESS] Lagerliste_V3 ready: ' + result.spreadsheetUrl, 'log-success');
+        }
         setProgress(1.0);
         finish(false, false);
       }
@@ -237,11 +344,11 @@
           log('> PIPELINE HALTED BY USER.', 'log-warn');
           setProgressStyle('#fab387');
         } else if (hasError) {
-          setStatus('Completed with errors — review the log belpw.');
+          setStatus('Completed with errors - review the log below.');
           setProgressStyle('#f38ba8');
         } else {
-          setStatus('Done! All stored procedures executed successfully.');
-          log('> STORED PROCEDURES PIPELINE COMPLETE', 'log-success');
+          setStatus('Done! Stored procedures and Connected Sheets completed successfully.');
+          log('> EXECUTE QUERIES PIPELINE COMPLETE', 'log-success');
           setProgressStyle('linear-gradient(90deg, #34a853, #a6e3a1)');
         }
       }
