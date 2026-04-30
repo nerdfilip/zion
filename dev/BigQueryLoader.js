@@ -23,8 +23,6 @@ function getFolderConfigForBQLoader_() {
 }
 
 // List of tracked files to set row logic
-// IMPORTANT: Specific keywords MUST be placed before generic ones 
-// (e.g., "aktionsplan int_ltu" must be above "aktionsplan")
 const FILE_RULES = [
   { keyword: "übersicht überschneiderartikel", headerRow: 2, dataRow: 3 }, 
   { keyword: "osnl",                           headerRow: 2, dataRow: 3 }, 
@@ -46,7 +44,11 @@ const FILE_RULES = [
   { keyword: "gesamt export cbx",              headerRow: 1, dataRow: 2 },
   { keyword: "lagerliste",                     headerRow: 1, dataRow: 2 },
   { keyword: "product ratings report",         headerRow: 1, dataRow: 2 }, 
-  { keyword: "wt stationär",                   headerRow: 1, dataRow: 2 }
+  { keyword: "wt stationär",                   headerRow: 1, dataRow: 2 },
+  { keyword: "db abfrage_t_dim_product_variant", headerRow: 1, dataRow: 2 },
+  { keyword: "db abfrage nachbetrachtung",       headerRow: 1, dataRow: 2 },
+  { keyword: "ganzjahresartikel",                headerRow: 1, dataRow: 2 },
+  { keyword: "artikelkette",                     headerRow: 1, dataRow: 2 }
 ];
 
 const OS_SHARED_SCHEMA = { kopfartikel: "STRING", ergebnis: "FLOAT64" };
@@ -258,8 +260,95 @@ const FILE_SPECIAL_OPTIONS = [
       bemerkung_an_ekl: "STRING", aufgeteilte_lieferung: "STRING", bemerkung_5: "STRING",
       filialplatzierung_int: "STRING", artikeltyp: "STRING"
     }
+  },
+  {
+    keyword: "db abfrage_t_dim_product_variant",
+    typeOverrides: {
+      prod_nr: "INT64",
+      prod_size_type_cd: "STRING",
+      palette_capacity_cnt: "INT64"
+    }
+  },
+  {
+    keyword: "db abfrage nachbetrachtung", 
+    typeOverrides: {
+      laenderspezifische_sap_nummern: "INT64",
+      shop: "STRING",
+      promo_nr: "FLOAT64",
+      promo_descr: "STRING",
+      saisonkennzeichen: "STRING",
+      marke: "STRING",
+      markentyp: "STRING",
+      artikeltyp: "STRING",
+      world_of_need_cd: "INT64",
+      world_of_need_name: "STRING",
+      category_of_need_cd: "INT64",
+      category_of_need_name: "STRING",
+      prod_family_cd: "FLOAT64",
+      mwst: "INT64",
+      max_liefertermin_datum: "STRING",
+      abverkaufshorizont_angepasst: "INT64",
+      max_liefertermin_kw: "STRING",
+      ian: "STRING",
+      abverkaufshorizont: "FLOAT64",
+      bisherige_bestellmenge: "INT64",
+      zukuenftige_bestellmenge: "INT64",
+      vk_aktuell: "FLOAT64",
+      vk_alt: "FLOAT64",
+      verwertungszeitpunkt: "STRING",
+      verwertungszeitpunkt_kw_jahr: "STRING",
+      jetzt_verwerten: "STRING",
+      col_1_betrachtungszeitpunkt: "STRING",
+      col_1_betrachtungszeitpunkt_kw_jahr: "STRING",
+      col_2_betrachtungszeitpunkt: "STRING",
+      col_2_betrachtungszeitpunkt_kw_jahr: "STRING",
+      col_3_betrachtungszeitpunkt: "STRING",
+      col_3_betrachtungszeitpunkt_kw_jahr: "STRING",
+      col_4_betrachtungszeitpunkt: "STRING",
+      col_4_betrachtungszeitpunkt_kw_jahr: "STRING",
+      col_5_betrachtungszeitpunkt: "STRING",
+      col_5_betrachtungszeitpunkt_kw_jahr: "STRING",
+      betrachtungszeitpunkte: "STRING",
+      zu_betrachten: "STRING"
+    }
+  },
+  {
+    keyword: "ganzjahresartikel",
+    keepColumnIndexes: [0, 1],
+    typeOverrides: {
+      ian: "STRING",
+      ganzjahres: "STRING"
+    }
+  },
+  {
+    keyword: "artikelkette",
+    keepColumnIndexes: [0, 1],
+    typeOverrides: {
+      ian: "STRING",
+      artikelkette: "STRING"
+    }
   }
 ];
+
+// ============================================================================
+// GLOBAL ROBUST RETRY WRAPPER
+// Resolves Transient BigQuery and DriveApp 'Service error' exceptions
+// ============================================================================
+function executeWithRetry_(action, maxRetries = 3) {
+  for (let attempts = 1; attempts <= maxRetries; attempts++) {
+    try {
+      return action();
+    } catch (e) {
+      const msg = e.message || String(e);
+      if (attempts < maxRetries) {
+        console.warn(`[RETRY] Error caught: ${msg}. Retrying ${attempts}/${maxRetries} in 3 seconds...`);
+        Utilities.sleep(3000 * attempts); // Backoff progresiv
+      } else {
+        throw e;
+      }
+    }
+  }
+}
 
 // ============================================================================
 // HELPERS (DATA TYPE DETECTION & FORMATTING)
@@ -319,7 +408,15 @@ function inferDataTypeFromSamples_(samples, fileDelimiter) {
 
 function resolveColumnTypeWithOverrides_(headerName, sampleValues, fileDelimiter, typeOverrides) {
   const key = String(headerName || '').toLowerCase();
-  if (typeOverrides && typeOverrides[key]) return typeOverrides[key];
+  
+  if (typeOverrides && typeOverrides[key]) {
+    return typeOverrides[key];
+  }
+  
+  if (typeOverrides) {
+    console.warn(`⚠️ [SCHEMA WARN] Column "${key}" not found in predefined schema`);
+  }
+  
   return inferDataTypeFromSamples_(sampleValues, fileDelimiter);
 }
 
@@ -378,72 +475,70 @@ function buildRawHeaders_(parsedRows, lineRows, fileDelimiter, headerRow, header
 }
 
 // ============================================================================
-// MASSIVE FILE AUTO-CHUNKER & INDEX INJECTOR
-// By-passes the 50MB Apps Script RAM limit by reading files in 15MB chunks
+// MASSIVE FILE AUTO-CHUNKER & INDEX INJECTOR (With Fallback)
 // ============================================================================
 function autoChunkAndIndexMassiveCsv_(fileId, fileName, fileDelimiter, headerRow, dataRow) {
   const token = ScriptApp.getOAuthToken();
   const fileUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`;
   
-  // 1. Get the total file size from Drive API
   const metaUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?fields=size`;
   const metaRes = UrlFetchApp.fetch(metaUrl, { headers: { 'Authorization': 'Bearer ' + token } });
   const fileSize = parseInt(JSON.parse(metaRes.getContentText()).size, 10);
   
-  const CHUNK_SIZE = 15 * 1024 * 1024; // Read 15 MB per step
+  const CHUNK_SIZE = 15 * 1024 * 1024;
   let startByte = 0;
-  let leftoverText = ""; // Holds the remainder of a line that was cut off
+  let leftoverText = ""; 
   let globalRowIndex = 1;
   let chunkNumber = 1;
   
   let tempFilesToDelete = [];
   let tempFileUris = [];
   
-  console.log(`[AUTO-CHUNK] File of ${(fileSize / 1024 / 1024).toFixed(2)} MB detected. Starting byte-stream slicing and indexing...`);
+  console.log(`[AUTO-CHUNK] File of ${(fileSize / 1024 / 1024).toFixed(2)} MB detected. Starting byte-stream slicing...`);
 
   while (startByte < fileSize) {
     let endByte = Math.min(startByte + CHUNK_SIZE - 1, fileSize - 1);
     
-    // 2. Download only a 15MB slice of the file
-    let res = UrlFetchApp.fetch(fileUrl, {
-      headers: { 'Authorization': 'Bearer ' + token, 'Range': `bytes=${startByte}-${endByte}` },
-      muteHttpExceptions: true
-    });
+    let res;
+    try {
+      res = UrlFetchApp.fetch(fileUrl, {
+        headers: { 'Authorization': 'Bearer ' + token, 'Range': `bytes=${startByte}-${endByte}` },
+        muteHttpExceptions: false
+      });
+    } catch (e) {
+      console.warn(`[AUTO-CHUNK] URLFetch Quota / Transfer Limit hit: ${e.message}`);
+      throw new Error("URLFETCH_QUOTA_EXCEEDED"); // Trigger fallback
+    }
     
     let chunkText = leftoverText + res.getContentText();
     
-    // 3. Ensure we do not cut a row in half (split at the last newline)
     if (endByte < fileSize - 1) {
       let lastNewlineIdx = chunkText.lastIndexOf('\n');
       if (lastNewlineIdx !== -1) {
-        leftoverText = chunkText.substring(lastNewlineIdx + 1); // Keep the rest for the next chunk
-        chunkText = chunkText.substring(0, lastNewlineIdx); // Keep only complete rows
+        leftoverText = chunkText.substring(lastNewlineIdx + 1); 
+        chunkText = chunkText.substring(0, lastNewlineIdx); 
       }
     } else {
       leftoverText = "";
     }
     
-    // 4. Parse the CSV (guaranteed to be safe for RAM)
     let csvData;
     try {
       csvData = Utilities.parseCsv(chunkText, fileDelimiter);
     } catch(e) {
-      console.log(`[CSV PARSE ERROR] Formatting errors in chunk ${chunkNumber}. Attempting simple split fallback.`);
       csvData = chunkText.split('\n').map(row => row.split(fileDelimiter));
     }
     
-    // 5. Inject the continuous Row Index
     for (let i = 0; i < csvData.length; i++) {
       if (chunkNumber === 1 && i === headerRow - 1) {
-        csvData[i].unshift('index'); // Header name is exactly "index"
+        csvData[i].unshift('index'); 
       } else if (chunkNumber === 1 && i < dataRow - 1) {
-        csvData[i].unshift(''); // Blank space for ignored rows
+        csvData[i].unshift(''); 
       } else {
-        csvData[i].unshift(globalRowIndex++); // Add sequential number and increment
+        csvData[i].unshift(globalRowIndex++); 
       }
     }
     
-    // 6. Rebuild the CSV chunk safely
     const newCsvText = csvData.map(row => row.map(cell => {
       let str = String(cell || '');
       if (str.includes(fileDelimiter) || str.includes('"') || str.includes('\n')) {
@@ -452,8 +547,8 @@ function autoChunkAndIndexMassiveCsv_(fileId, fileName, fileDelimiter, headerRow
       return str;
     }).join(fileDelimiter)).join('\n');
     
-    // 7. Save the temporary chunk to Drive
-    let tempFile = DriveApp.createFile(`temp_idx_chunk_${chunkNumber}_${fileName}`, newCsvText, MimeType.CSV);
+    // Wrapped in retry to prevent "Service Error: Drive"
+    let tempFile = executeWithRetry_(() => DriveApp.createFile(`temp_idx_chunk_${chunkNumber}_${fileName}`, newCsvText, MimeType.CSV));
     tempFilesToDelete.push(tempFile);
     tempFileUris.push(`https://drive.google.com/open?id=${tempFile.getId()}`);
     
@@ -482,21 +577,20 @@ function cleanTableName(fileName) {
   return 'raw_' + en.replace(/[^a-zA-Z0-9_]/g, '_').toLowerCase();
 }
 
-// ============================================================================
-// FETCH READY FILES
-// ============================================================================
 function getReadyFiles() {
   console.log("[INIT] Scanning '02_Ready' folder for files to import...");
   const folderCfg = getFolderConfigForBQLoader_();
-  const folder = DriveApp.getFolderById(folderCfg.ready.id);
-  const files = folder.getFiles();
+  
+  // Retry fetch folder and files to avoid Drive errors
+  const folder = executeWithRetry_(() => DriveApp.getFolderById(folderCfg.ready.id));
+  const files = executeWithRetry_(() => folder.getFiles());
   
   let fileMap = {};
   let standaloneFiles = [];
 
-  while (files.hasNext()) {
-    let f = files.next();
-    let name = f.getName();
+  while (executeWithRetry_(() => files.hasNext())) {
+    let f = executeWithRetry_(() => files.next());
+    let name = executeWithRetry_(() => f.getName());
     
     let chunkMatch = name.match(/^(.*)__chunk_(\d+)\.csv$/i);
     if (chunkMatch) {
@@ -523,7 +617,7 @@ function getReadyFiles() {
 }
 
 // ============================================================================
-// SCHEMA DETECTOR 
+// SCHEMA DETECTOR (With Fallback)
 // ============================================================================
 function buildDynamicSchema(fileId, headerRow, dataRow, forcedDelimiter, projectId, datasetId, mimeType, specialOptions) {
   console.log(`[SCHEMA] Phase 1: Fetching file ID ${fileId}...`);
@@ -531,13 +625,20 @@ function buildDynamicSchema(fileId, headerRow, dataRow, forcedDelimiter, project
     ? `https://docs.google.com/spreadsheets/d/${fileId}/export?format=csv` 
     : `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`;
 
-  let response = UrlFetchApp.fetch(url, {
-    headers: { 'Authorization': 'Bearer ' + ScriptApp.getOAuthToken(), 'Range': 'bytes=0-500000' },
-    muteHttpExceptions: true
-  });
+  let rawText = "";
+  try {
+    let response = UrlFetchApp.fetch(url, {
+      headers: { 'Authorization': 'Bearer ' + ScriptApp.getOAuthToken(), 'Range': 'bytes=0-500000' }
+    });
+    rawText = response.getContentText();
+  } catch (e) {
+    console.warn(`[SCHEMA] UrlFetchApp Limit Reached. Fallback to DriveApp...`);
+    // Retry Blob fetching for Google Drive fallback
+    let blob = executeWithRetry_(() => DriveApp.getFileById(fileId).getBlob());
+    rawText = blob.getDataAsString().substring(0, 500000);
+  }
   
   console.log(`[SCHEMA] Phase 2: Parsing CSV bytes...`);
-  let rawText = response.getContentText();
   let lines = rawText.split(/\r?\n/);
   
   const opts = specialOptions || {};
@@ -558,18 +659,23 @@ function buildDynamicSchema(fileId, headerRow, dataRow, forcedDelimiter, project
 
   console.log(`[SCHEMA] Phase 3-4: Translating and Deduplicating headers...`);
   const map = { 'ä':'ae', 'ö':'oe', 'ü':'ue', 'Ä':'ae', 'Ö':'oe', 'Ü':'ue', 'ß':'ss' };
+  
   let englishHeaders = rawHeaders.map(val => {
     let en = String(val).replace(/[äöüÄÖÜß]/g, m => map[m]).replace(/[^a-zA-Z0-9_]/g, '_').toLowerCase().replace(/_+/g, '_').replace(/^_|_$/g, '');
-    return (!en || /^[0-9]/.test(en)) ? 'col_' + en : en.substring(0, 290);
+    
+    if (!en) return 'col_empty_' + Math.floor(Math.random()*1000); 
+
+    if (/^[0-9]/.test(en)) {
+      return opts.allowNumberStart ? en.substring(0, 290) : 'col_' + en.substring(0, 290);
+    }
+    
+    return en.substring(0, 290);
   });
 
   let used = new Set(), finalSchemaFields = [];
   for(let i = 0; i < englishHeaders.length; i++) {
     let f = englishHeaders[i];
-    
-    if (opts.renameColumns && opts.renameColumns[f]) {
-      f = opts.renameColumns[f];
-    }
+    if (opts.renameColumns && opts.renameColumns[f]) f = opts.renameColumns[f];
     
     let c = 1;
     let baseName = f;
@@ -586,12 +692,14 @@ function buildDynamicSchema(fileId, headerRow, dataRow, forcedDelimiter, project
 }
 
 // ============================================================================
-// MAIN PIPELINE: PROCESS SINGLE FILE WITH INDEXING AND ORDER BY
+// MAIN PIPELINE: PROCESS SINGLE FILE
 // ============================================================================
 function processSingleBQFile(fileObj) {
   const folderCfg = getFolderConfigForBQLoader_();
-  const archiveFolder = DriveApp.getFolderById(folderCfg.archive.id);
-  const file = DriveApp.getFileById(fileObj.id);
+  
+  // Wrap fetching objects in retry
+  const archiveFolder = executeWithRetry_(() => DriveApp.getFolderById(folderCfg.archive.id));
+  const file = executeWithRetry_(() => DriveApp.getFileById(fileObj.id));
   const lowerName = fileObj.name.toLowerCase();
   
   console.log(`\n======================================================\n[SERVER] STARTING IMPORT PIPELINE: ${fileObj.name}\n======================================================`);
@@ -618,46 +726,69 @@ function processSingleBQFile(fileObj) {
 
     let isSheet = fileObj.mimeType === MimeType.GOOGLE_SHEETS;
     let externalUris = [];
+    let chunkData = null;
 
     // AUTO-CHUNKER & INDEX INJECTION
     if (!isSheet && fileDelimiter) {
-      console.log(`[PRE-PROCESS] Injecting 'index' column into CSV...`);
-      finalSchema.unshift({ name: 'index', type: 'INT64' }); // Ensure name is "index"
-      
-      let chunkData = autoChunkAndIndexMassiveCsv_(fileObj.id, fileObj.name, fileDelimiter, headerRow, dataRow);
-      
-      externalUris = chunkData.tempFileUris;
-      tempFilesToDelete = chunkData.tempFilesObjects;
-      
-    } else {
-      externalUris = [`https://docs.google.com/spreadsheets/d/${fileObj.id}`];
+      try {
+        console.log(`[PRE-PROCESS] Attempting to inject 'index' column into CSV...`);
+        chunkData = autoChunkAndIndexMassiveCsv_(fileObj.id, fileObj.name, fileDelimiter, headerRow, dataRow);
+        if (chunkData && chunkData.tempFileUris.length > 0) {
+          finalSchema.unshift({ name: 'index', type: 'INT64' });
+        }
+      } catch (e) {
+        console.warn(`[PRE-PROCESS] Failed to chunk (Quota Limit / Error). Fallback to DIRECT Import: ${e.message}`);
+      }
     }
 
+    let isChunked = (chunkData && chunkData.tempFileUris.length > 0);
+
     let externalDataConfiguration = {
-      sourceUris: externalUris, 
       sourceFormat: isSheet ? "GOOGLE_SHEETS" : "CSV",
       autodetect: false,
       ignoreUnknownValues: true
     };
 
-    if (isSheet) {
-      externalDataConfiguration.googleSheetsOptions = { skipLeadingRows: dataRow - 1 };
-      let limitedRange = buildSheetRangeFromColumnIndexes_(specialOptions.keepColumnIndexes || []);
-      if (limitedRange) externalDataConfiguration.googleSheetsOptions.range = limitedRange;
-    } else {
+    if (isChunked) {
+      externalUris = chunkData.tempFileUris;
+      tempFilesToDelete = chunkData.tempFilesObjects;
+      externalDataConfiguration.sourceUris = externalUris;
       externalDataConfiguration.csvOptions = { 
         skipLeadingRows: 0, 
         allowQuotedNewlines: true, 
         fieldDelimiter: fileDelimiter,
-        allowJaggedRows: true  // <--- ACEASTA ESTE REZOLVAREA
+        allowJaggedRows: true 
       };
+    } else {
+      // NATIVE DRIVE FALLBACK
+      externalUris = [`https://drive.google.com/open?id=${fileObj.id}`];
+      externalDataConfiguration.sourceUris = externalUris;
+      
+      // Safety check: ensure index is removed if chunking failed
+      finalSchema = finalSchema.filter(f => f.name !== 'index');
+
+      if (isSheet) {
+        externalDataConfiguration.googleSheetsOptions = { skipLeadingRows: dataRow - 1 };
+        let limitedRange = buildSheetRangeFromColumnIndexes_(specialOptions.keepColumnIndexes || []);
+        if (limitedRange) externalDataConfiguration.googleSheetsOptions.range = limitedRange;
+      } else {
+        externalDataConfiguration.csvOptions = { 
+          skipLeadingRows: dataRow - 1, 
+          allowQuotedNewlines: true, 
+          fieldDelimiter: fileDelimiter,
+          allowJaggedRows: true 
+        };
+      }
     }
 
-    BigQuery.Tables.insert({
-      tableReference: { projectId: GCP_PROJECT_ID, datasetId: DATASET_ID, tableId: tempTableId },
-      schema: { fields: finalSchema.map(f => ({ name: f.name, type: 'STRING' })) }, 
-      externalDataConfiguration
-    }, GCP_PROJECT_ID, DATASET_ID);
+    // Insert Temp Table using Robust Retry
+    executeWithRetry_(() => {
+      BigQuery.Tables.insert({
+        tableReference: { projectId: GCP_PROJECT_ID, datasetId: DATASET_ID, tableId: tempTableId },
+        schema: { fields: finalSchema.map(f => ({ name: f.name, type: 'STRING' })) }, 
+        externalDataConfiguration
+      }, GCP_PROJECT_ID, DATASET_ID);
+    });
 
     let selectCols = finalSchema.map(f => {
       let colName = `\`${f.name}\``;
@@ -695,23 +826,28 @@ function processSingleBQFile(fileObj) {
       }
     }).join(',\n      ');
 
-    // ANCHOR FIX: Cast column to STRING before applying TRIM to avoid type errors on INT64/FLOAT64
     let schemaForAnchor = finalSchema.filter(f => f.name !== 'index');
     let anchorFields = schemaForAnchor.slice(0, 3).map(f => `\`${f.name}\` IS NOT NULL AND LOWER(TRIM(CAST(\`${f.name}\` AS STRING))) != LOWER('${f.name}')`); 
     let anchorCondition = anchorFields.length > 0 ? anchorFields.join(' OR ') : '1=1';
 
-    // SQL EXECUTION WITH FINAL "ORDER BY `index` ASC"
+    let hasIndex = finalSchema.some(f => f.name === 'index');
+    let innerWhere = hasIndex ? "WHERE SAFE_CAST(\`index\` AS INT64) IS NOT NULL" : "";
+    let orderByClause = hasIndex ? "ORDER BY \`index\` ASC" : "";
+
     let query = `
       CREATE OR REPLACE TABLE \`${GCP_PROJECT_ID}.${DATASET_ID}.${tableName}\` AS
       SELECT * FROM (
         SELECT ${selectCols} FROM \`${GCP_PROJECT_ID}.${DATASET_ID}.${tempTableId}\`
-        WHERE SAFE_CAST(\`index\` AS INT64) IS NOT NULL 
+        ${innerWhere}
       )
       WHERE ${anchorCondition}
-      ORDER BY \`index\` ASC;
+      ${orderByClause};
     `;
 
-    let insertedJob = BigQuery.Jobs.insert({ configuration: { query: { query: query, useLegacySql: false } } }, GCP_PROJECT_ID);
+    // Insert Job using Robust Retry
+    let insertedJob = executeWithRetry_(() => {
+      return BigQuery.Jobs.insert({ configuration: { query: { query: query, useLegacySql: false } } }, GCP_PROJECT_ID);
+    });
 
     let [maxAttempts, success, errorMsg] = [300, false, ""];
     for (let i = 0; i < maxAttempts; i++) {
@@ -728,12 +864,12 @@ function processSingleBQFile(fileObj) {
 
     try { BigQuery.Tables.remove(GCP_PROJECT_ID, DATASET_ID, tempTableId); } catch(e) {}
     
-    // CLEANUP: Trash temporary chunk files in Drive
-    tempFilesToDelete.forEach(f => { try { f.setTrashed(true); } catch(e) {} });
+    // Trash temp chunks using retry to avoid API fail
+    tempFilesToDelete.forEach(f => { executeWithRetry_(() => f.setTrashed(true)); });
     
     if (success) {
-      file.moveTo(archiveFolder); 
-      return { success: true, log: `[SUCCESS] Injected into '${tableName}' ordered by index. Original moved to Archive.` };
+      executeWithRetry_(() => file.moveTo(archiveFolder)); 
+      return { success: true, log: `[SUCCESS] Injected into '${tableName}'${hasIndex ? ' ordered by index' : ' (Direct Mode)'}. Moved to Archive.` };
     } 
     return { success: false, log: errorMsg ? `[ERROR] BigQuery rejected: ${errorMsg}` : `[ERROR] Timeout.` };
     
